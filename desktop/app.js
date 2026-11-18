@@ -101,6 +101,8 @@ const KIND_LABEL = {
   direction: 'DIRIGIENDO',
   'direction+ollama': 'DIRIGIENDO + OLLAMA',
   assemble: 'UNIENDO',
+  scratch: 'LABORATORIO',
+  'voice-test': 'PRUEBA DE VOZ',
 };
 
 function renderJob(job) {
@@ -129,7 +131,18 @@ async function startPolling() {
       }
     } else {
       stopPolling();
-      if (job.state === 'done') toast('Listo: ' + (job.message || ''), 'ok');
+      if (job.state === 'done') {
+        toast('Listo: ' + (job.message || ''), 'ok');
+        if (state.autoplayResult && job.result && job.result.audio_url) {
+          state.autoplayResult = false;
+          playAudio(job.result.audio_url,
+            job.result.character
+              ? job.result.character + ' (prueba de voz)'
+              : 'Laboratorio');
+        }
+      } else if (state.autoplayResult) {
+        state.autoplayResult = false;
+      }
       if (job.state === 'failed') toast('Fallo: ' + (job.message || ''), 'err');
       rerender();
     }
@@ -141,7 +154,7 @@ function stopPolling() {
 }
 
 function rerender() {
-  ({ library: viewLibrary, studio: viewStudio, cast: viewCast, voices: viewVoices }[state.view] || viewLibrary)();
+  ({ library: viewLibrary, studio: viewStudio, cast: viewCast, voices: viewVoices, lab: viewLab }[state.view] || viewLibrary)();
 }
 
 /* ---------------- navegación ---------------- */
@@ -156,7 +169,7 @@ document.querySelectorAll('.nav-item').forEach((b) => {
 });
 
 function rerenderTo(view) {
-  ({ library: viewLibrary, studio: viewStudio, cast: viewCast, voices: viewVoices }[view])();
+  ({ library: viewLibrary, studio: viewStudio, cast: viewCast, voices: viewVoices, lab: viewLab }[view])();
 }
 
 /* ---------------- biblioteca ---------------- */
@@ -493,9 +506,13 @@ async function viewCast() {
     speed.value = c.speed ?? 1;
     row.appendChild(speed);
 
+    const test = el('button', 'btn btn-ghost', 'Probar');
+    test.title = 'Escucha una frase generada con esta voz, tal como sonará en la lectura';
+    test.onclick = () => testVoice(c);
     const save = el('button', 'btn', 'Guardar');
     save.onclick = () => doSave(c, engSel, voiceSel, profSel, speed);
     row.appendChild(save);
+    row.appendChild(test);
     table.appendChild(row);
   }
   v.appendChild(table);
@@ -526,6 +543,15 @@ async function doSave(c, engSel, voiceSel, profSel, speed) {
     }
   } catch (e) { toast(e.message, 'err'); }
   viewCast();
+}
+
+async function testVoice(c) {
+  try {
+    await post(`/api/characters/${c.id}/voice-test`);
+    state.autoplayResult = true;
+    toast(`Generando prueba de ${c.name}…`);
+    startPolling();
+  } catch (e) { toast(e.message, 'err'); }
 }
 
 /* ---------------- voces clonadas ---------------- */
@@ -606,6 +632,73 @@ async function viewVoices() {
     grid.appendChild(card);
   }
   v.appendChild(grid);
+}
+
+/* ---------------- laboratorio (texto libre) ---------------- */
+async function viewLab() {
+  setActiveNav('lab');
+  const v = $('#view');
+  v.innerHTML = '';
+  const head = el('div', 'view-head');
+  head.appendChild(el('h1', null, 'Laboratorio — texto libre'));
+  v.appendChild(head);
+
+  const wrap = el('div', 'hud lab');
+  wrap.style.maxWidth = '880px';
+
+  const ta = el('textarea', 'lab-text');
+  ta.placeholder = 'Escribe aquí el texto que quieres escuchar (acepta [pausa=2s] y [silencio=1.5s])…';
+  ta.value = localStorage.getItem('aurea.labText') || '';
+  ta.oninput = () => localStorage.setItem('aurea.labText', ta.value);
+
+  const row = el('div', 'form-row');
+  const voiceSel = el('select');
+  const ogK = el('optgroup');
+  ogK.label = 'Kokoro (voces base)';
+  const KN = { em_alex: 'Alex (m) — narrador por defecto', ef_dora: 'Dora (f)', em_santa: 'Santa (f)' };
+  for (const scan of state.kokoroVoices) {
+    ogK.appendChild(new Option(KN[scan] || scan, 'kokoro:' + scan));
+  }
+  voiceSel.appendChild(ogK);
+
+  const profiles = await get('/api/voice-profiles');
+  if (profiles.length) {
+    const ogP = el('optgroup');
+    ogP.label = 'Clones XTTS';
+    for (const p of profiles) ogP.appendChild(new Option(p.name, 'xtts:' + p.id));
+    voiceSel.appendChild(ogP);
+  }
+
+  if (state.bookId) {
+    const chars = await get(`/api/books/${state.bookId}/characters`);
+    if (chars.length) {
+      const ogC = el('optgroup');
+      ogC.label = 'Personajes de ' + state.bookTitle + ' (así sonarán en la lectura)';
+      for (const c of chars) {
+        ogC.appendChild(new Option(c.name + (c.is_narrator ? ' ★' : ''), 'char:' + c.id));
+      }
+      voiceSel.appendChild(ogC);
+    }
+  }
+
+  const btnGo = el('button', 'btn btn-primary', '▶ Escuchar texto');
+  btnGo.onclick = async () => {
+    const text = ta.value.trim();
+    if (!text) { toast('Escribe algo de texto primero', 'err'); return; }
+    try {
+      await post('/api/scratch', { text, source: voiceSel.value || 'kokoro:em_alex' });
+      state.autoplayResult = true;
+      toast('Sintetizando…');
+      startPolling();
+    } catch (e) { toast(e.message, 'err'); }
+  };
+  const hint = el('div', 'lab-hint', state.bookId
+    ? 'Elige una voz base, un clon o un personaje del libro actual.'
+    : 'Elige un libro en Biblioteca para probar también las voces del reparto.');
+
+  row.append(voiceSel, btnGo);
+  wrap.append(ta, row, hint);
+  v.appendChild(wrap);
 }
 
 /* ---------------- transporte ---------------- */

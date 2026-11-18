@@ -29,6 +29,7 @@ from aurea.core.database import Database          # noqa: E402
 from aurea.core.engine import assemble_chapter, run_generation  # noqa: E402
 from aurea.core.segmentation import clean_segment_text, segmentize  # noqa: E402
 from aurea.direction.engine import run_direction  # noqa: E402
+from aurea.core.scratch import run_scratch        # noqa: E402
 from aurea.casting.cast_manager import CastManager    # noqa: E402
 from aurea.casting.detector import detect_characters  # noqa: E402
 from aurea.ingestion.importer import import_book      # noqa: E402
@@ -64,7 +65,7 @@ def _start_job(kind, chapter_id, fn):
         if _job["state"] == "running":
             return False
         _job.update(kind=kind, chapter_id=chapter_id, state="running",
-                    progress=0, message="", log=[])
+                    progress=0, message="", log=[], result=None)
 
     def on_progress(pct, msg):
         with _job_lock:
@@ -80,11 +81,15 @@ def _start_job(kind, chapter_id, fn):
         _log("✖ " + str(msg))
 
     def on_done(*args):
-        line = " · ".join(str(a) for a in args if a)
+        result = next((a for a in args if isinstance(a, dict)), None)
+        line = " · ".join(str(a) for a in args
+                          if a and not isinstance(a, dict))
         with _job_lock:
             _job["state"] = "done"
             _job["progress"] = 100
             _job["message"] = line
+            if result is not None:
+                _job["result"] = result
         _log("✔ " + line)
 
     def runner():
@@ -96,6 +101,42 @@ def _start_job(kind, chapter_id, fn):
 
     threading.Thread(target=runner, daemon=True).start()
     return True
+
+
+def _scratch_job(text, source, op, od, of):
+    """Job del Laboratorio: texto libre con la voz elegida."""
+    try:
+        wav = run_scratch(text, source, on_progress=op)
+    except Exception as e:  # noqa: BLE001
+        return of(f"{type(e).__name__}: {e}")
+    od("Audio del laboratorio listo",
+       {"audio_url": "/api/audio?path=" + quote(str(wav))})
+
+
+def _voice_test_job(cid, text, op, od, of):
+    """Prueba la voz de un personaje por el MISMO camino que la lectura
+    (sanitize_cast + voice_map + motor). Genera una frase de muestra."""
+    try:
+        db = Database()
+        found = None
+        for b in db.books():
+            for c in db.characters(b.id):
+                if c.id == cid:
+                    found = (b, c)
+                    break
+            if found:
+                break
+        if not found:
+            return of("Personaje no encontrado")
+        _b, c = found
+        sample_text = (text or
+                       f"Hola, soy {c.name}. Así sueno en la lectura del libro.")
+        wav = run_scratch(sample_text, f"char:{cid}", on_progress=op, db=db)
+    except Exception as e:  # noqa: BLE001
+        return of(f"{type(e).__name__}: {e}")
+    od(f"Prueba de voz de {c.name} lista",
+       {"audio_url": "/api/audio?path=" + quote(str(wav)),
+        "character": c.name})
 
 
 # ------------------------------------------------------------------
@@ -401,6 +442,28 @@ class Handler(BaseHTTPRequestHandler):
                 lambda op, od, of: assemble_chapter(ch, on_progress=op,
                                                     on_done=od, on_failed=of))
             return self._accept(started)
+        # Laboratorio: texto personalizado con la voz elegida (job)
+        if path == "/api/scratch":
+            text = str(body.get("text") or "")
+            source = str(body.get("source") or "kokoro:em_alex")
+            if not text.strip():
+                return self._err(400, "Falta el texto")
+            started = _start_job(
+                "scratch", None,
+                lambda op, od, of: _scratch_job(text, source, op, od, of))
+            return self._accept(started)
+
+        # Probar la voz de un personaje como sonará en la lectura (job)
+        if len(parts) == 4 and parts[1] == "characters" \
+                and parts[3] == "voice-test":
+            cid = int(parts[2])
+            ctext = str(body.get("text") or "").strip() or None
+            started = _start_job(
+                "voice-test", None,
+                lambda op, od, of, cid=cid, ctext=ctext: _voice_test_job(
+                    cid, ctext, op, od, of))
+            return self._accept(started)
+
         # Dirigir capítulo (job)
         if len(parts) == 4 and parts[1] == "chapters" and parts[3] == "direct":
             cid = int(parts[2])
