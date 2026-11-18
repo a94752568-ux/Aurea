@@ -56,6 +56,31 @@ def concat_segments(segs, wav_path):
     return wav_path
 
 
+def _synth_kokoro(adapter, seg, v, vsp, pace, fallback, cast,
+                  on_progress):
+    """Sintetiza con Kokoro con red de seguridad: si la voz del personaje
+    no existe en el bin de voces, se corrige en la BD y se reintenta."""
+    if v not in VOICES_ES:
+        safe = fallback[1] if fallback[1] in VOICES_ES else VOICES_ES[0]
+        if cast is not None and seg.character_id is not None:
+            try:
+                cast.assign(seg.character_id, safe, vsp,
+                            engine="kokoro", profile_id=None)
+                on_progress(0, f"Voz inválida '{v}' corregida a '{safe}' "
+                               f"en la BD (personaje del seg {seg.idx})")
+            except Exception:  # noqa: BLE001
+                on_progress(0, f"Voz inválida '{v}'; uso '{safe}' "
+                               "(no se pudo corregir en la BD)")
+        v = safe
+    try:
+        return adapter.synthesize(seg.text, voice=v, speed=vsp * pace)
+    except ValueError as e:
+        # Última red: el bin no trae la voz pedida pese a todo
+        safe = fallback[1] if fallback[1] in VOICES_ES else VOICES_ES[0]
+        on_progress(0, f"{e}; reintento con '{safe}'")
+        return adapter.synthesize(seg.text, voice=safe, speed=vsp * pace)
+
+
 def run_generation(chapter, voice, speed, force=False,
                    on_progress=None, on_failed=None, on_done=None):
     """Genera el capítulo completo: segmentos TTS + unión con pausas.
@@ -110,12 +135,6 @@ def run_generation(chapter, voice, speed, force=False,
                 t0 = time.perf_counter()
                 use_xtts = (eng == "xtts")
                 sample = clone_map.get(seg.character_id) if use_xtts else None
-                if not use_xtts and v not in VOICES_ES:
-                    # Defensa: una voz inválida guardada en la BD no debe
-                    # tumbar el job entero; avisa y usa la voz del narrador.
-                    on_progress(0, f"Voz '{v}' no existe en Kokoro; "
-                                   f"uso '{fallback[1]}' (corrígela en Reparto)")
-                    v = fallback[1]
                 if use_xtts and sample:
                     if xtts is None:
                         xtts = XTTSAdapter()
@@ -124,8 +143,12 @@ def run_generation(chapter, voice, speed, force=False,
                         seg.text, speaker_wav=sample, speed=vsp * pace)
                     voice_tag = "clon"
                 else:
-                    samples, sr = adapter.synthesize(
-                        seg.text, voice=v, speed=vsp * pace)
+                    if use_xtts:
+                        on_progress(0, f"Clon sin muestra usable en seg "
+                                       f"{seg.idx}; uso Kokoro")
+                    samples, sr = _synth_kokoro(
+                        adapter, seg, v, vsp, pace, fallback, cast,
+                        on_progress)
                     voice_tag = v
                 samples = np.clip(samples * gain_for(seg), -1.0, 1.0)
                 seg_wav = out_dir / f"cap_{chapter.idx:03d}_seg{seg.idx:04d}.wav"
