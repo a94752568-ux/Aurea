@@ -1,0 +1,99 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+*.egg
+*.egg-info
+dist/
+build/
+eggs/
+.eggs/
+.eggs-info/
+*.log
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+.cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Thumbs
+Thumbs.db
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Database
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Audio / Media
+*.wav
+*.mp3
+*.mp4
+*.ogg
+*.flac
+*.aac
+*.m4a
+
+# Voices / XTTS
+voices/
+
+# Models / ML
+*.onnx
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+models/
+*.gguf
+*.ggml
+
+# Output
+output/
+output/**
+results/
+results/**
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Kilo / Agent Manager
+.kilo/agent-manager.json
+
+# Temporary
+.tmp/
+tmp/
+*.tmp
+
+# Books / scripts (large text + audio assets, not source code)
+books/

@@ -1,0 +1,200 @@
+import sqlite3
+from pathlib import Path
+
+from .models import Book, Chapter, Character, Segment
+
+DB_PATH = Path.home() / "aurea" / "aurea.db"
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS books(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL,
+  path TEXT NOT NULL,
+  fmt TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS chapters(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+  idx INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  text TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS segments(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  chapter_id INTEGER NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+  idx INTEGER NOT NULL,
+  text TEXT NOT NULL,
+  wav_path TEXT,
+  status TEXT NOT NULL DEFAULT 'pending'
+);
+CREATE TABLE IF NOT EXISTS characters(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  voice TEXT NOT NULL DEFAULT 'em_alex',
+  speed REAL NOT NULL DEFAULT 1.0,
+  is_narrator INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(book_id, name)
+);
+"""
+
+NEW_SEGMENT_COLS = {
+    "emotion": "TEXT",
+    "delivery": "TEXT",
+    "intensity": "REAL",
+    "pace": "REAL",
+    "pause_before_ms": "INTEGER",
+    "pause_after_ms": "INTEGER",
+    "directed": "INTEGER NOT NULL DEFAULT 0",
+}
+
+
+class Database:
+    """SQLite: metadatos del proyecto. Los WAV viven fuera de la base."""
+
+    def __init__(self, path=DB_PATH):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(path)
+        self.conn.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self):
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(segments)")}
+        for name, decl in NEW_SEGMENT_COLS.items():
+            if name not in cols:
+                self.conn.execute(f"ALTER TABLE segments ADD COLUMN {name} {decl}")
+        if "kind" not in cols:
+            self.conn.execute(
+                "ALTER TABLE segments ADD COLUMN kind TEXT NOT NULL DEFAULT 'narration'")
+        if "character_id" not in cols:
+            self.conn.execute("ALTER TABLE segments ADD COLUMN character_id INTEGER")
+        # Migración Fase 4c: columnas de clonación en characters
+        char_cols = {r[1] for r in self.conn.execute("PRAGMA table_info(characters)")}
+        if "engine" not in char_cols:
+            self.conn.execute(
+                "ALTER TABLE characters ADD COLUMN engine TEXT DEFAULT 'kokoro'")
+        if "voice_profile_id" not in char_cols:
+            self.conn.execute(
+                "ALTER TABLE characters ADD COLUMN voice_profile_id INTEGER")
+        self.conn.commit()
+
+    # ---- libros ----
+    def add_book(self, title, path, fmt):
+        cur = self.conn.execute(
+            "INSERT INTO books(title, path, fmt) VALUES (?,?,?)", (title, path, fmt))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def books(self):
+        rows = self.conn.execute("SELECT id, title, path, fmt FROM books ORDER BY id")
+        return [Book(*r) for r in rows]
+
+    # ---- capítulos ----
+    def add_chapter(self, book_id, idx, title, text):
+        cur = self.conn.execute(
+            "INSERT INTO chapters(book_id, idx, title, text) VALUES (?,?,?,?)",
+            (book_id, idx, title, text))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def chapters(self, book_id):
+        rows = self.conn.execute(
+            "SELECT id, book_id, idx, title, text FROM chapters "
+            "WHERE book_id=? ORDER BY idx", (book_id,))
+        return [Chapter(*r) for r in rows]
+
+    def chapter(self, chapter_id):
+        row = self.conn.execute(
+            "SELECT id, book_id, idx, title, text FROM chapters WHERE id=?",
+            (chapter_id,)).fetchone()
+        return Chapter(*row) if row else None
+
+    # ---- segmentos ----
+    SEG_COLS = ("id, chapter_id, idx, text, wav_path, status, kind, character_id, "
+                "emotion, delivery, intensity, pace, pause_before_ms, "
+                "pause_after_ms, directed")
+    def add_segment(self, chapter_id, idx, text, kind="narration",
+                    character_id=None, pause_after_ms=None):
+        cur = self.conn.execute(
+            "INSERT INTO segments(chapter_id, idx, text, kind, character_id, "
+            "pause_after_ms) VALUES (?,?,?,?,?,?)",
+            (chapter_id, idx, text, kind, character_id, pause_after_ms))
+        self.conn.commit()
+        return Segment(cur.lastrowid, chapter_id, idx, text, None, "pending",
+                       kind, character_id, pause_after_ms=pause_after_ms)
+
+    def segments(self, chapter_id):
+        rows = self.conn.execute(
+            f"SELECT {self.SEG_COLS} FROM segments WHERE chapter_id=? ORDER BY idx",
+            (chapter_id,))
+        return [Segment(*r) for r in rows]
+
+    def update_segment(self, seg_id, wav_path, status):
+        self.conn.execute(
+            "UPDATE segments SET wav_path=?, status=? WHERE id=?",
+            (wav_path, status, seg_id))
+        self.conn.commit()
+
+    def clear_segments(self, chapter_id):
+        self.conn.execute("DELETE FROM segments WHERE chapter_id=?", (chapter_id,))
+        self.conn.commit()
+
+    def update_direction(self, seg_id, emotion, delivery, intensity, pace,
+                         pause_before_ms, pause_after_ms, directed=1):
+        self.conn.execute(
+            "UPDATE segments SET emotion=?, delivery=?, intensity=?, pace=?, "
+            "pause_before_ms=?, pause_after_ms=?, directed=? WHERE id=?",
+            (emotion, delivery, intensity, pace, pause_before_ms,
+             pause_after_ms, directed, seg_id))
+        self.conn.commit()
+
+    # ---- personajes ----
+    def add_character(self, book_id, name, voice, speed, is_narrator=0):
+        self.conn.execute(
+            "INSERT OR IGNORE INTO characters(book_id, name, voice, speed, is_narrator) "
+            "VALUES (?,?,?,?,?)", (book_id, name, voice, speed, is_narrator))
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT id FROM characters WHERE book_id=? AND name=?",
+            (book_id, name)).fetchone()
+        return row[0]
+
+    def characters(self, book_id):
+        rows = self.conn.execute(
+            "SELECT id, book_id, name, voice, speed, is_narrator, engine, voice_profile_id "
+            "FROM characters WHERE book_id=? ORDER BY is_narrator DESC, name",
+            (book_id,))
+        return [Character(*r) for r in rows]
+
+    def update_character(self, char_id, voice, speed, engine=None, profile_id=None):
+        self.conn.execute(
+            "UPDATE characters SET voice=?, speed=?, engine=?, voice_profile_id=? "
+            "WHERE id=?",
+            (voice, speed, engine or "kokoro", profile_id, char_id))
+        self.conn.commit()
+
+    def add_character_with_profile(self, book_id, name, voice, speed,
+                                   engine="kokoro", voice_profile_id=None,
+                                   is_narrator=0):
+        self.conn.execute(
+            "INSERT OR IGNORE INTO characters(book_id, name, voice, speed, is_narrator, "
+            "engine, voice_profile_id) VALUES (?,?,?,?,?,?,?)",
+            (book_id, name, voice, speed, is_narrator, engine, voice_profile_id))
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT id FROM characters WHERE book_id=? AND name=?",
+            (book_id, name)).fetchone()
+        return row[0]
+
+    # ---- borrado de libro ----
+    def delete_book(self, book_id):
+        """Borra un libro y sus capítulos, segmentos y personajes de la BD.
+        Los archivos WAV en disco bajo output/book_<id>/ se borran si existen."""
+        from pathlib import Path
+        import shutil
+        # Borrar archivos de audio asociados
+        out_dir = Path.home() / "aurea" / "output" / f"book_{book_id}"
+        if out_dir.exists():
+            shutil.rmtree(out_dir, ignore_errors=True)
+        self.conn.execute("DELETE FROM books WHERE id=?", (book_id,))
+        self.conn.commit()
