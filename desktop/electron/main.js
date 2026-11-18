@@ -3,9 +3,14 @@
  * Responsabilidades:
  *  1. Arrancar el servidor Python (aurea/server.py) con el venv local.
  *  2. Esperar a que /api/health responda.
- *  3. Abrir la ventana y proveer diálogos nativos (libros y muestras de voz).
+ *  3. Abrir la ventana (frameless con barra de título propia) y proveer
+ *     diálogos nativos (libros y muestras de voz).
+ *
+ * v0.6: ventana sin marco del sistema (frame: false) con controles
+ * min/max/cerrar propios vía IPC, y tamaño ajustado al área de trabajo
+ * de la pantalla (auto-maximiza en pantallas pequeñas).
  */
-const { app, BrowserWindow, dialog, ipcMain } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, screen } = require('electron');
 const { spawn } = require('child_process');
 const http = require('http');
 const fs = require('fs');
@@ -95,14 +100,33 @@ function registerIpc() {
     });
     return r.canceled ? null : r.filePaths[0];
   });
+
+  // Controles de ventana de la barra de título propia
+  ipcMain.on('window:minimize', () => { if (win) win.minimize(); });
+  ipcMain.on('window:maximizeToggle', () => {
+    if (!win) return;
+    if (win.isMaximized()) win.unmaximize();
+    else win.maximize();
+  });
+  ipcMain.on('window:close', () => { if (win) win.close(); });
+  ipcMain.handle('window:isMaximized', () => (win ? win.isMaximized() : false));
 }
 
 function createWindow() {
+  // Tamaño dentro del área de trabajo real (respeta barra de tareas):
+  // nunca más grande que la pantalla.
+  const wa = screen.getPrimaryDisplay().workArea;
+  const width = Math.min(1440, wa.width - 24);
+  const height = Math.min(920, wa.height - 24);
+
   win = new BrowserWindow({
-    width: 1440,
-    height: 920,
-    minWidth: 1180,
-    minHeight: 760,
+    width,
+    height,
+    minWidth: 1024,
+    minHeight: 640,
+    x: wa.x + Math.floor((wa.width - width) / 2),
+    y: wa.y + Math.floor((wa.height - height) / 2),
+    frame: false, // barra de título propia (styles.css .titlebar)
     backgroundColor: '#070b14',
     title: 'AUREA Studio',
     autoHideMenuBar: true,
@@ -113,8 +137,21 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
+
+  // En pantallas que no llegan al tamaño de diseño, maximizar directamente.
+  if (wa.width < 1500 || wa.height < 960) win.maximize();
+
   win.loadFile(path.join(__dirname, '..', 'index.html'));
   win.once('ready-to-show', () => win.show());
+
+  // Avisar al renderer cuando cambia el estado maximizado (icono □/❐)
+  const notifyMax = () => {
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('window:maximizedChanged', win.isMaximized());
+    }
+  };
+  win.on('maximize', notifyMax);
+  win.on('unmaximize', notifyMax);
 }
 
 app.whenReady().then(async () => {

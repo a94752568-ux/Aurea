@@ -3,7 +3,14 @@
 run_generation() ejecuta la generación completa de un capítulo en el hilo
 del llamador: el servidor AUREA lo corre en un hilo de trabajo y el
 adaptador PySide6 (core/generator.py) dentro de un QThread. Sin Qt.
+
+v0.6: sanitize_cast() reconcilia el reparto al arrancar (perfiles clonados
+con nombre tipo em_origins → XTTS automáticamente; voces kokoro
+inexistentes → voz del narrador), clean_segment_text() limpia los textos
+heredados de la BD (fuera "—dijo Narrador.") invalidando su WAV, y
+voice_tag muestra la voz REAL usada tras cualquier fallback.
 """
+import os
 import shutil
 import time
 from pathlib import Path
@@ -12,7 +19,7 @@ import numpy as np
 import soundfile as sf
 
 from .database import Database
-from .segmentation import gain_for, segmentize
+from .segmentation import clean_segment_text, gain_for, segmentize
 from ..casting.cast_manager import CastManager
 from ..tts.kokoro_adapter import KokoroAdapter, VOICES_ES
 from ..voice import clone_store
@@ -56,10 +63,10 @@ def concat_segments(segs, wav_path):
     return wav_path
 
 
-def _synth_kokoro(adapter, seg, v, vsp, pace, fallback, cast,
-                  on_progress):
+def _synth_kokoro(adapter, seg, v, vsp, pace, fallback, cast, on_progress):
     """Sintetiza con Kokoro con red de seguridad: si la voz del personaje
-    no existe en el bin de voces, se corrige en la BD y se reintenta."""
+    no existe en el bin de voces, se corrige en la BD y se reintenta.
+    Devuelve (samples, sr, voz_efectiva_usada)."""
     if v not in VOICES_ES:
         safe = fallback[1] if fallback[1] in VOICES_ES else VOICES_ES[0]
         if cast is not None and seg.character_id is not None:
@@ -72,13 +79,40 @@ def _synth_kokoro(adapter, seg, v, vsp, pace, fallback, cast,
                 on_progress(0, f"Voz inválida '{v}'; uso '{safe}' "
                                "(no se pudo corregir en la BD)")
         v = safe
+    text = clean_segment_text(seg.text)  # defensa final anti "—dijo Narrador."
     try:
-        return adapter.synthesize(seg.text, voice=v, speed=vsp * pace)
+        samples, sr = adapter.synthesize(text, voice=v, speed=vsp * pace)
+        return samples, sr, v
     except ValueError as e:
         # Última red: el bin no trae la voz pedida pese a todo
         safe = fallback[1] if fallback[1] in VOICES_ES else VOICES_ES[0]
         on_progress(0, f"{e}; reintento con '{safe}'")
-        return adapter.synthesize(seg.text, voice=safe, speed=vsp * pace)
+        samples, sr = adapter.synthesize(text, voice=safe, speed=vsp * pace)
+        return samples, sr, safe
+
+
+def _clean_stored_segments(db, segs, on_progress):
+    """Limpieza de textos heredados de la BD: fuera etiquetas de habla tipo
+    "—dijo Narrador.". Si el texto cambia, el WAV viejo queda invalidado
+    (se borra) para que se regenere con el texto limpio."""
+    cleaned = 0
+    for s in segs:
+        clean = clean_segment_text(s.text)
+        if clean != s.text:
+            if s.wav_path and Path(s.wav_path).exists():
+                try:
+                    os.remove(s.wav_path)
+                except OSError:
+                    pass
+            db.conn.execute("UPDATE segments SET text=?, wav_path=NULL, "
+                            "status='pending' WHERE id=?", (clean, s.id))
+            s.text = clean
+            cleaned += 1
+    if cleaned:
+        db.conn.commit()
+        on_progress(0, f"Limpieza: {cleaned} segmento(s) con etiquetas de "
+                       "habla eliminadas del texto; se regenerarán")
+    return cleaned
 
 
 def run_generation(chapter, voice, speed, force=False,
@@ -105,10 +139,21 @@ def run_generation(chapter, voice, speed, force=False,
         cast = CastManager(db) if use_cast else None
         if cast:
             cast.ensure_narrator(book_id)
+            # v0.6: reconciliación automática de voces con la realidad
+            # de los motores (clones XTTS y voces Kokoro válidas).
+            fixed = cast.sanitize_cast(book_id, set(VOICES_ES))
+            if fixed:
+                on_progress(0, f"Reparto saneado: {fixed} personaje(s) con "
+                               "la voz reconciliada automáticamente")
 
         if force:
             db.clear_segments(chapter.id)
         segs = db.segments(chapter.id)
+
+        # Textos guardados en BD pueden contener etiquetas de habla viejas:
+        # se limpian y su audio queda invalidado para regenerarse.
+        _clean_stored_segments(db, segs, on_progress)
+
         if not segs:
             parts = segmentize(chapter.text, use_cast)
             for i, (kind, speaker, chunk, pause) in enumerate(parts):
@@ -140,16 +185,17 @@ def run_generation(chapter, voice, speed, force=False,
                         xtts = XTTSAdapter()
                         xtts.load()
                     samples, sr = xtts.generate(
-                        seg.text, speaker_wav=sample, speed=vsp * pace)
+                        clean_segment_text(seg.text),
+                        speaker_wav=sample, speed=vsp * pace)
                     voice_tag = "clon"
                 else:
                     if use_xtts:
                         on_progress(0, f"Clon sin muestra usable en seg "
                                        f"{seg.idx}; uso Kokoro")
-                    samples, sr = _synth_kokoro(
+                    samples, sr, used_voice = _synth_kokoro(
                         adapter, seg, v, vsp, pace, fallback, cast,
                         on_progress)
-                    voice_tag = v
+                    voice_tag = used_voice
                 samples = np.clip(samples * gain_for(seg), -1.0, 1.0)
                 seg_wav = out_dir / f"cap_{chapter.idx:03d}_seg{seg.idx:04d}.wav"
                 adapter.save_wav(seg_wav, samples, sr)

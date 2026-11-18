@@ -2,6 +2,7 @@
    AUREA Studio — tema Neon HUD (identidad cyberpunk propia)
    Paleta: cian primario, magenta destructivo, ámbar de acento,
    verde de confirmación, sobre fondo azul-negro profundo.
+   v0.6: barra de título propia (ventana frameless).
    ============================================================ */
 
 :root {
@@ -18,6 +19,7 @@
   --muted: #7e93b4;
   --mono: 'JetBrains Mono', 'DejaVu Sans Mono', ui-monospace, Menlo, Consolas, monospace;
   --sans: 'Inter', 'DejaVu Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --titlebar-h: 36px;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -30,6 +32,8 @@ body {
   color: var(--text);
   overflow: hidden;
   user-select: none;
+  display: flex;
+  flex-direction: column;
 }
 
 .mono { font-family: var(--mono); }
@@ -50,8 +54,66 @@ body {
 }
 ::-webkit-scrollbar-thumb:hover { background: #24365c; }
 
+/* ---------------- barra de título propia ---------------- */
+#titlebar {
+  height: var(--titlebar-h);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-left: 14px;
+  background: linear-gradient(180deg, #0c1426 0%, #080d1a 100%);
+  border-bottom: 1px solid var(--line-soft);
+  -webkit-app-region: drag;   /* arrastrable para mover la ventana */
+}
+
+.tb-title {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.3em;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tb-title .brand-mark {
+  color: var(--magenta);
+  font-size: 10px;
+  text-shadow: 0 0 10px rgba(255, 45, 120, 0.6);
+}
+
+.tb-controls {
+  display: flex;
+  height: 100%;
+  -webkit-app-region: no-drag;
+}
+
+.tb-btn {
+  width: 46px;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  border: none;
+  border-left: 1px solid var(--line-soft);
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.tb-btn:hover { background: rgba(0, 243, 255, 0.10); color: var(--cyan); }
+
+.tb-btn.tb-close:hover {
+  background: var(--magenta);
+  color: #14060c;
+  box-shadow: 0 0 16px rgba(255, 45, 120, 0.5);
+}
+
 /* ---------------- estructura ---------------- */
-.app { display: flex; height: 100vh; }
+.app { display: flex; flex: 1; min-height: 0; }
 
 .sidebar {
   width: 232px;

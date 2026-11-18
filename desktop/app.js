@@ -2,6 +2,8 @@
    AUREA Studio — renderer (vanilla JS, sin frameworks)
    Vistas: Biblioteca · Estudio · Reparto · Voces
    Transporte con waveform; polling de jobs contra /api/job.
+   v0.6: ventana frameless (barra de título propia), limpieza de
+   etiquetas de habla y reconciliación automática de voces.
    ============================================================ */
 'use strict';
 
@@ -43,6 +45,22 @@ function toast(msg, kind = 'info') {
     t.classList.remove('show');
     setTimeout(() => t.remove(), 300);
   }, 4500);
+}
+
+/* ---------------- ventana (barra de título propia) ---------------- */
+$('#tb-min').addEventListener('click', () => A.minimizeWindow());
+$('#tb-max').addEventListener('click', () => A.toggleMaximize());
+$('#tb-close').addEventListener('click', () => A.closeWindow());
+$('#titlebar').addEventListener('dblclick', (e) => {
+  if (e.target.closest('.tb-btn')) return;
+  A.toggleMaximize();
+});
+if (A.onMaximizeChanged) {
+  A.onMaximizeChanged((max) => {
+    const b = $('#tb-max');
+    b.innerHTML = max ? '&#x274F;' : '&#x25A1;';
+    b.title = max ? 'Restaurar' : 'Maximizar';
+  });
 }
 
 /* ---------------- api ---------------- */
@@ -271,6 +289,20 @@ function renderChapterDetail(polling = false) {
   btnDetect.onclick = () => doAction('Detectando reparto…', `/api/chapters/${ch.id}/detect`);
   const btnEnsure = el('button', 'btn btn-ghost', '▣ Crear segmentos');
   btnEnsure.onclick = () => doAction('Creando segmentos…', `/api/chapters/${ch.id}/segments`);
+  const btnClean = el('button', 'btn btn-ghost', '🧹 Limpiar tags');
+  btnClean.title = 'Quita etiquetas de habla ("—dijo Narrador.") de los segmentos; el audio afectado se regenera';
+  btnClean.onclick = async () => {
+    try {
+      const r = await post(`/api/chapters/${ch.id}/clean`);
+      if (r.cleaned) {
+        toast(`Limpiados ${r.cleaned} segmentos; regenera para actualizar el audio`, 'ok');
+        state.chapterData = await get('/api/chapters/' + ch.id);
+        renderChapterDetail();
+      } else {
+        toast('Sin etiquetas de habla: nada que limpiar', 'ok');
+      }
+    } catch (e) { toast(e.message, 'err'); }
+  };
   const lbl = el('label', 'check');
   const llm = el('input');
   llm.type = 'checkbox';
@@ -306,8 +338,8 @@ function renderChapterDetail(polling = false) {
     toast('Regenerando…');
     startPolling();
   };
-  bar.append(btnDetect, btnEnsure, lbl, btnDirect, el('span', 'spacer'),
-             btnListen, btnGen, btnForce);
+  bar.append(btnDetect, btnEnsure, btnClean, lbl, btnDirect,
+             el('span', 'spacer'), btnListen, btnGen, btnForce);
   right.appendChild(bar);
 
   const list = el('div', 'seg-list');
@@ -379,8 +411,18 @@ async function viewCast() {
   }
   const head = el('div', 'view-head');
   head.appendChild(el('h1', null, 'Reparto — ' + state.bookTitle));
+  const btnSanitize = el('button', 'btn', '✨ Reconciliar voces');
+  btnSanitize.title = 'Detecta perfiles de voz clonada guardados y se los asigna a los personajes; corrige voces Kokoro inexistentes';
+  btnSanitize.onclick = async () => {
+    try {
+      const r = await post(`/api/books/${state.bookId}/cast-sanitize`);
+      toast(r.fixed ? `${r.fixed} personaje(s) reconciliados automáticamente` :
+             'Todas las voces ya estaban bien', 'ok');
+      setTimeout(viewCast, 300);
+    } catch (e) { toast(e.message, 'err'); }
+  };
   const btnDetect = el('button', 'btn btn-primary', '⛳ Detectar reparto');
-  head.appendChild(btnDetect);
+  head.append(btnSanitize, btnDetect);
   v.appendChild(head);
 
   let chars = [];
@@ -519,8 +561,13 @@ async function viewVoices() {
     const chips = el('div', 'profile-chips');
     chips.appendChild(el('span', 'chip chip-cyan',
       String(p.sample_path || '').split('/').pop()));
+    // Aviso si la muestra vive en /tmp (se pierde al reiniciar)
+    const sp = String(p.sample_path || '');
+    if (sp.startsWith('/tmp/')) {
+      chips.appendChild(el('span', 'chip chip-amber', 'muestra temporal'));
+    }
     card.appendChild(chips);
-    const pathLine = el('div', 'mono', p.sample_path || '');
+    const pathLine = el('div', 'mono', sp);
     pathLine.style.cssText =
       'font-size:10px;color:var(--muted);margin-bottom:12px;word-break:break-all;';
     card.appendChild(pathLine);

@@ -6,7 +6,11 @@ Electron. Estándar de la librería: sin PySide6 (cero Qt) ni dependencias
 nuevas, sobre el mismo motor validado de las Fases 1-4c.
 
 Arranque: .venv/bin/python aurea/server.py
-Regla AUREA respetada: un solo job TTS a la vez (JobManager).
+Regla AUREA respetada: un solo job TTS/dirección a la vez (JobManager).
+
+v0.6: POST /api/chapters/{id}/clean (fuera etiquetas de habla "—dijo
+Narrador." de los segmentos ya guardados, invalida su WAV) y
+POST /api/books/{id}/cast-sanitize (reconciliación manual de voces).
 """
 import json
 import os
@@ -23,11 +27,12 @@ if str(ROOT) not in sys.path:
 
 from aurea.core.database import Database          # noqa: E402
 from aurea.core.engine import run_generation      # noqa: E402
-from aurea.core.segmentation import segmentize    # noqa: E402
+from aurea.core.segmentation import clean_segment_text, segmentize  # noqa: E402
 from aurea.direction.engine import run_direction  # noqa: E402
 from aurea.casting.cast_manager import CastManager    # noqa: E402
 from aurea.casting.detector import detect_characters  # noqa: E402
 from aurea.ingestion.importer import import_book      # noqa: E402
+from aurea.tts.kokoro_adapter import VOICES_ES        # noqa: E402
 from aurea.voice import clone_store                   # noqa: E402
 from aurea.voice.sample_prep import import_sample     # noqa: E402
 
@@ -320,6 +325,40 @@ class Handler(BaseHTTPRequestHandler):
             cast = CastManager(db)
             created = cast.build_cast(ch.book_id, names)
             return self._send(200, {"detected": names, "created": created})
+
+        # Saneo manual del reparto (reconciliación de voces)
+        if len(parts) == 4 and parts[1] == "books" \
+                and parts[3] == "cast-sanitize":
+            db = Database()
+            cast = CastManager(db)
+            fixed = cast.sanitize_cast(int(parts[2]), set(VOICES_ES))
+            _log(f"Reparto saneado: {fixed} personaje(s) reconciliados")
+            return self._send(200, {"fixed": fixed})
+
+        # Limpiar etiquetas de habla ("—dijo Narrador.") de segmentos guardados
+        if len(parts) == 4 and parts[1] == "chapters" and parts[3] == "clean":
+            cid = int(parts[2])
+            db = Database()
+            if not db.chapter(cid):
+                return self._err(404, "Capítulo no encontrado")
+            cleaned = 0
+            for s in db.segments(cid):
+                clean = clean_segment_text(s.text)
+                if clean != s.text:
+                    if s.wav_path and Path(s.wav_path).exists():
+                        try:
+                            os.remove(s.wav_path)
+                        except OSError:
+                            pass
+                    db.conn.execute(
+                        "UPDATE segments SET text=?, wav_path=NULL, "
+                        "status='pending' WHERE id=?", (clean, s.id))
+                    cleaned += 1
+            if cleaned:
+                db.conn.commit()
+            _log(f"Limpieza de etiquetas: {cleaned} segmento(s) "
+                 "(regenera para actualizar el audio)")
+            return self._send(200, {"cleaned": cleaned})
 
         # Dirigir capítulo (job)
         if len(parts) == 4 and parts[1] == "chapters" and parts[3] == "direct":

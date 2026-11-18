@@ -54,6 +54,13 @@ def _split_markers(text):
     return result
 
 
+def clean_segment_text(text):
+    """Limpieza final anti etiquetas de habla ("—dijo Narrador."):
+    uso defensivo sobre texto ya guardado en BD antes de sintetizar.
+    No toca los marcadores [pausa]/[silencio] (eso hace parse_markers)."""
+    return _strip_speech_tag(text or "")
+
+
 def segmentize(text, use_cast):
     out = []
     if not use_cast:
