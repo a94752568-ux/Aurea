@@ -1,10 +1,36 @@
 # AUREA — Estado compactado (STATE.md)
 
-Generado: 2026-11-12. Actualizado tras implementar mejoras para EL QUINTO SOL (reglas de pausas v2, soporte Markdown v2, sistema de dirección, clonación XTTS integrada).
+Generado: 2026-11-12 (Fases 1-4c). Actualizado 2026-11-18: REFACTOR ELECTRON (rama electron-refactor).
 Uso: leer este archivo y la memoria antes de seguir trabajando. No rehacer lo ya hecho.
 
+## Refactor Electron v0.6 (2026-11-18) — RAMA electron-refactor
+
+**Motivo**: Alberto pidió cambiar PySide6 por Electron con acabado profesional y premium.
+
+**Decisión de arquitectura**: Electron/Chromium no puede ejecutar Kokoro/XTTS (la inferencia es Python local, regla AUREA), así que el motor Python se conserva y se le quita Qt; un servidor HTTP local hace de puente y toda la UI se migra a web (Electron). Motor validado intacto: solo se reorganizó.
+
+**Qué se creó (rutas exactas, en la rama `electron-refactor`)**:
+- `aurea/core/segmentation.py`: lógica pura movida de `generator.py` (segmentize, _split_chunk, _split_markers, gain_for + alias _gain_for, MAX_SEG/PAUSE_S/DIALOGUE_PAUSE_S). Compat total: `generator.py` re-exporta todo.
+- `aurea/core/engine.py`: `run_generation()` Qt-free (puerto de ChapterGenerator.run: Kokoro singleton, XTTS lazy por clon, gain, concat con pausas, latest.wav) + `concat_segments()`. Callbacks: on_progress(pct,msg), on_failed(msg), on_done(msg).
+- `aurea/core/generator.py`: ahora adaptador QThread fino que delega en engine.py; conserva señales y `_concat(segs, vmap, fallback, wav_path)` para main_window.py y scripts.
+- `aurea/direction/engine.py`: `run_direction()` Qt-free (capa 1 reglas instantáneas idéntica; capa 2 Ollama qwen3.5:2b opcional, _chat/_parse/batch items). on_done(n_reglas, n_llm).
+- `aurea/direction/director.py`: adaptador QThread fino (DirectionWorker conserva sus señales).
+- `aurea/server.py`: puente HTTP stdlib (ThreadingHTTPServer, sin PySide6 ni dependencias nuevas) en 127.0.0.1:8765 (env AUREA_PORT). Endpoints: GET health / voices / job / books / books/{id}/chapters / books/{id}/characters / chapters/{id} / voice-profiles / audio (Range) / audio/peaks; POST books (importar), chapters/{id}/segments, /detect, /direct, /generate, voice-profiles; PUT characters/{id} (kokoro o xtts+profile); DELETE books/{id}, voice-profiles/{id}. JobManager: UN solo job a la vez (regla AUREA), log en memoria (200 líneas). Solo sirve WAV bajo ~/aurea/output (defensa de ruta), CORS abierto a localhost.
+- `desktop/`: Electron. `package.json` (electron ^33, main electron/main.js, script start), `electron/main.js` (arranca server con AUREA_PYTHON o el .venv, espera health 30s, diálogos nativos de libro y muestra, ventana 1440x920 bg #070b14, cierra server al salir), `electron/preload.js` (contextBridge: API + openBookDialog/openAudioDialog), `index.html` (sidebar + jobbar + transporte con waveform), `styles.css` (Neon HUD premium: cian #00f3ff primario, magenta #ff2d78 destructivo, ámbar #ffb020, verde #2dff9e, brackets en .hud, chaflanes clip-path, chips mono uppercase, scrollbars, toasts), `app.js` (vanilla SPA: 4 vistas Biblioteca/Estudio/Reparto/Voces, polling /api/job cada 800ms con re-render de segmentos, waveform con picos del server, transporte <audio> con progreso, guardado de reparto).
+- `scripts/setup_electron.sh` (npm install + prueba de imports del server SIN PySide6) y `aurea-electron.sh` (arranque: npm start).
+
+**Errata corregida**: el STATE v0.5 decía "audio_processor integrado", pero el commit v0.5 lo REMOVIÓ: `generator.py` actual no usa `audio_processor` (verificado en el código).
+
+**Pendiente (en orden)**:
+1) En la laptop: `git fetch && git checkout electron-refactor && bash scripts/setup_electron.sh`
+2) `bash aurea-electron.sh` y validar: importar libro, detectar reparto, dirigir, generar, escuchar (segmento y capítulo), importar muestra de voz, asignar XTTS a un personaje.
+3) Tras validar: merge a master y bump de versión en `aurea/__init__.py` (0.6.0).
+4) Heredados de v0.5 (esperando archivos de Alberto): importar guion.md de EL QUINTO SOL (6 personajes, 99 segmentos) y aplicar direccion-larga.csv como prueba de pipeline.
+
+**Riesgo conocido**: `voice/clone_store.py` usa la BD en la RAÍZ del repo, mientras `core/database.py` usa `~/aurea/aurea.db`. Hoy coinciden porque el repo vive en `/home/aegis2/aurea`. Si se clona en otra ruta, la BD se parte en dos. Al integrar, unificar clone_store sobre Database.DB_PATH.
+
 ## Qué se está construyendo
-AUREA Audiobook Studio — estudio local de audiolibros dramatizados, 100% offline tras la instalación. Stack: Python 3.12 + venv (`.venv`), PySide6 UI, SQLite (`aurea.db`), Kokoro ONNX (TTS base), XTTS v2 (clonación de voz, preparada), Misaki/espeak-ng (G2P español).
+AUREA Audiobook Studio — estudio local de audiolibros dramatizados, 100% offline tras la instalación. Stack: Python 3.12 + venv (`.venv`), UI Electron (refactor v0.6; PySide6 conserva compat), SQLite (`aurea.db`), Kokoro ONNX (TTS base), XTTS v2 (clonación de voz, preparada), Misaki/espeak-ng (G2P español).
 
 ## Qué ya quedó hecho (rutas exactas)
 Fases aplicadas sobre el código en disco:
@@ -15,32 +41,27 @@ Fases aplicadas sobre el código en disco:
 - Fase 4c Clonación XTTS: `voice/clone_store.py`, `voice/sample_prep.py`, `voice/xtts_adapter.py`, `ui/clone_panel.py` (simplificado), `scripts/smoke_fase4c.py`. Reparte asigna voces XTTS automáticamente (`casting/cast_manager.py`). Requiere `pip install coqui-tts` + PyTorch/CPU.
 - Reglas de pausas (v2): `direction/rules.py` con vocabularios de espec 4.1 (12 emociones, 6 volúmenes, 5 ritmos), defaults de volumen por verbo (4.2), `direct_segment` rellena pausas de TODOS los segmentos (nunca NULL), prioridad marcador > hablante > puntuación > 0. `core/generator.py` (`segmentize` procesa marcadores; `_concat` honra `pause_after_ms` y elimina pausa duplicada). `core/database.py` (`add_segment` acepta `pause_after_ms`, `update_character` con `engine`/`profile_id`, `add_character_with_profile`).
 - Soporte Markdown .md (v2): `ingestion/md_reader.py` (H1=nuevo capítulo con segmento de anuncio narrador + pausa 800ms; H2/H3=corte de sección con pausa 800/500ms; `---`=800ms; limpieza de formato; listas como segmentos con pausa de coma 180ms; marcadores de pausa), `ingestion/importer.py` (registra .md), `ui/main_window.py` (.md en filtro de archivo).
-- Procesamiento de audio automático: `core/audio_processor.py` (normalización RMS, compresión, limitador, potenciador de graves, herramientas estéreo), integrado en `core/generator.py` (`process_segment` por segmento; `process_master` en `_concat`).
-- Tema Cyberpunk Neon para la GUI: `ui/theme.py` (paleta COLORS cian #00f3ff + magenta #ff00ff + texto #e8fbff + fondo #080c18, QSS global con bordes de color, `apply_dark_palette()` para QPalette Fusion oscura, `HudPanel` con esquinas bracket, `Sidebar`, `WaveformView`, `toast`). Integrado en `main_window.py` vía `apply_theme` + `apply_dark_palette`.
-- Flujo dirigir-antes-de-generar: `main_window.py:_generate_chapter_with_direction()` dirige automáticamente segmentos no dirigidos antes de generar audio. Botón "🎬 Dirigir" en página Estudio. `_ensure_segments()` crea segmentos automáticamente al importar un capítulo vacío. `DirectionWorker` + `ChapterGenerator` encadenados. Feedback con QMessageBox en todos los puntos de fallo. Primer capítulo seleccionado automáticamente al importar.
-- Clonación XTTS en reparto: `casting/cast_manager.py` (`build_cast` asigna voces Kokoro por defecto `ef_dora`/`em_santa`; las voces clonadas XTTS se asignan desde la GUI). `voice_map` devuelve `(engine, voz, velocidad)`. `ui/clone_panel.py` (flujo simplificado: importar → asignar, con selector Kokoro/XTTS). `ui/main_window.py` (página Reparto muestra voces asignadas).
+- Tema Cyberpunk Neon para la GUI PySide6: `ui/theme.py` (paleta COLORS cian #00f3ff + magenta #ff00ff + texto #e8fbff + fondo #080c18, QSS global con bordes de color, `apply_dark_palette()`, `HudPanel`, `Sidebar`, `WaveformView`, `toast`). Integrado en `main_window.py`.
+- Flujo dirigir-antes-de-generar: `main_window.py:_generate_chapter_with_direction()`; DirectionWorker + ChapterGenerator encadenados.
+- Clonación XTTS en reparto: `casting/cast_manager.py`, `voice_map` devuelve `(engine, voz, velocidad)`, `ui/clone_panel.py`.
 
 Archivos fuente clave (`/home/aegis2/aurea/aurea/`):
 - `__init__.py` (versión `0.4b+4c`)
 - `core/models.py` (Character con `engine` y `voice_profile_id`; Segment con campos de dirección)
-- `core/database.py` (`add_segment` con `pause_after_ms`; `add_character_with_profile`; `update_character` con `engine`/`profile_id`; migraciones de columnas de clonación y dirección)
-- `core/generator.py` (ChapterGenerator QThread; `_concat` con `pause_after_ms`, defensa contra `[` en TTS, manejo estéreo/mono; procesamiento de audio por segmento y master final vía `audio_processor`)
-- `core/audio_processor.py` (normalización RMS, compresión, limitador, bass boost, herramientas estéreo)
+- `core/database.py` (`add_segment` con `pause_after_ms`; `add_character_with_profile`; `update_character` con `engine`/`profile_id`; migraciones de clonación y dirección)
+- `core/segmentation.py` (NUEVO v0.6: segmentize y utilidades puras, Qt-free)
+- `core/engine.py` (NUEVO v0.6: run_generation Qt-free + concat_segments)
+- `core/generator.py` (adaptador QThread fino desde v0.6)
 - `ingestion/{base,text_reader,epub_reader,pdf_reader,md_reader,importer}.py`
-- `direction/{rules,director}.py` (reglas de pausa con vocabularios espec 4.1; Director Híbrido con Ollama opcional)
+- `direction/{rules,engine,director}.py` (engine NUEVO v0.6 Qt-free)
 - `casting/{detector,cast_manager}.py`
 - `voice/{clone_store,sample_prep,xtts_adapter}.py`
-- `ui/{main_window,theme,clone_panel,__init__}.py`
+- `server.py` (NUEVO v0.6: puente HTTP para Electron)
+- `ui/{main_window,theme,clone_panel,__init__}.py` (PySide6, compatible)
 
 Scripts:
-- `scripts/verificar_pausas.py` (pruebas de reglas de pausa)
-- `scripts/verificar_md.py` (pruebas de importación Markdown)
-- `scripts/verificar_direccion.py` (pruebas de aplicación de dirección)
-- `scripts/verificar_wav_capitulo.py` (prueba de generación de WAV capítulo)
-- `scripts/aplicar_direccion.py` (aplica CSV de dirección a segmentos)
-- `scripts/smoke_fase4c.py` (prueba de clonación XTTS)
-
-BD (`/home/aegis2/aurea/aurea.db`): libros/capítulos/segmentos/personajes/voice_profiles. Columnas `pause_before_ms`/`pause_after_ms`/`emotion`/`delivery`/`intensity`/`pace`/`directed` ya existen. Columnas `engine`/`voice_profiles.id` en `characters` ya existen.
+- `scripts/verificar_pausas.py` · `verificar_md.py` · `verificar_direccion.py` · `verificar_wav_capitulo.py` · `aplicar_direccion.py` · `smoke_fase4c.py`
+- `scripts/setup_electron.sh` (NUEVO v0.6) + `aurea-electron.sh` (raíz)
 
 ## Valores de la tabla de pausas (espec implementada)
 | Fuente | Valor | Notas |
@@ -89,42 +110,30 @@ BD (`/home/aegis2/aurea/aurea.db`): libros/capítulos/segmentos/personajes/voice
 
 ## Decisiones tomadas
 - Voz narradora por defecto: Kokoro fp16, `em_alex`.
-- Un solo modelo cargado a la vez (regla AUREA) en `KokoroAdapter` (singleton).
+- Un solo modelo cargado a la vez (regla AUREA): KokoroAdapter singleton + JobManager del servidor.
 - Metadatos en SQLite; el audio (WAV) vive en disco bajo `output/book_<id>/`.
 - Dirección híbrida: reglas instantáneas para lo literal; Ollama solo como refinamiento opcional.
 - XTTS reservado para voces clonadas; Kokoro para el resto.
-- `direct_segment` es idempotente: re-ejecutar no duplica pausas ni corrompe datos.
-- `aplicar_direccion` es idempotente: correr dos veces deja los mismos valores.
+- `direct_segment` y `aplicar_direccion` son idempotentes.
 - pause_before_ms solo al inicio del capítulo (600ms); el resto va en pause_after_ms del segmento anterior.
-- Marcadores `[` nunca llegan al TTS: dos capas de defensa (limpieza en `segmentize()` + ValueError en `_concat()`).
-- Redondeo: truncamiento (`int()`) para coincidir con ejemplos del spec (877.5 → 877, no 878).
+- Marcadores `[` nunca llegan al TTS: dos capas de defensa.
+- Redondeo: truncamiento (`int()`).
+- Refactor v0.6: Electron = capa de presentación; motor Python local sin Qt (server.py); PySide6 sigue funcionando como adaptador; sin dependencias nuevas de Python.
 - 4 personajes de EL QUINTO SOL (Moctezuma, Tlilpotonqui, Iztacxochitl, Xochitl) SIN voz asignada (esperando a Alberto).
-- Detector de personajes corregido (`casting/detector.py:analyze` divide por líneas en lugar de por párrafos): detecta los 7 personajes del capítulo 2 de EL QUINTO SOL (Citlali, Tochtli, Yaotl, Xochitl, Moctezuma, Tlilpotonqui, Iztacxochitl).
 
 ## Resultado validado
-- `scripts/verificar_pausas.py`: TODAS LAS PRUEBAS PASAN (20 casos: puntuación, cambio de hablante, marcadores al final/en medio/fuera de rango, modificadores ritmo/emoción, pregunta +200ms, intensidad +300ms, idempotencia, no-NULL).
-- `scripts/verificar_md.py`: TODAS LAS PRUEBAS PASAN (encabezados, limpieza de formato, listas, marcadores en .md, encabezado no contamina casting, sin marcas MD en segmentos, título H1 con pausa 800ms).
-- `scripts/verificar_direccion.py`: TODAS LAS PRUEBAS PASAN (aplicar CSV a 3 segmentos, personaje no coincidente se rechaza, idempotencia, defaults por verbo susurró→susurro/gritó→grito/ordenó→firme).
-- Detector de personajes probado con capítulo 2 de EL QUINTO SOL: detecta los 7 personajes (Citlali, Tochtli, Yaotl, Xochitl, Moctezuma, Tlilpotonqui, Iztacxochitl) en 23 segmentos (21 de diálogo + 2 de narración con marcadores de pausa).
-- `scripts/verificar_wav_capitulo.py`: verifica duración WAV = suma segmentos + suma pausas, sin clipping, sin corchetes en texto. Probado con libro 20 capítulo 0 (92 segmentos, 26 con audio generado): _concat funciona correctamente, sin clipping (peak 0.3872), sin corchetes, todos con pause_after_ms.
-- `scripts/smoke_fase4c.py`: OK: 11.3s de audio en 56.4s → RTF 4.98 | RAM pico 4432 MB.
+- `scripts/verificar_pausas.py`: TODAS LAS PRUEBAS PASAN (20 casos).
+- `scripts/verificar_md.py`: TODAS LAS PRUEBAS PASAN.
+- `scripts/verificar_direccion.py`: TODAS LAS PRUEBAS PASAN.
+- Detector de personajes: 7 personajes del cap. 2 de EL QUINTO SOL detectados.
+- `scripts/verificar_wav_capitulo.py`: OK (duración WAV = suma segmentos + pausas, sin clipping, sin corchetes).
+- `scripts/smoke_fase4c.py`: OK (RTF 4.98 | RAM pico 4432 MB).
+- Refactor v0.6: SIN probar en runtime (este entorno no ejecuta Node/Python); validar con setup_electron.sh en la laptop.
 
 ## Problemas conocidos (audio / TTS)
-- Pronunciación en español con Kokoro fp16: "baja" suena como "paja", nombres propios enredados. Limitaciones del G2P (Misaki/espeak-ng), no del código.
-- 4 segmentos existentes en BD tenían `[pausa=Xs]` sin limpiar. Ya limpiados (0 restantes). `_concat` lanza ValueError si intenta sintetizarlos (segunda capa de defensa). Los nuevos segmentos desde `segmentize()` tienen texto limpio.
-
-## Siguiente paso concreto
-1. ✅ Limpieza de 4 segmentos con corchetes y re-dirección capítulo 22 (libro 20) - HECHO
-2. ✅ Script `scripts/verificar_wav_capitulo.py` creado y probado - HECHO
-3. ✅ Reglas de pausas v2 con vocabularios espec 4.1 + marcadores `[pausa=Xs]`/`[silencio=Xs]` en cualquier texto - HECHO
-4. ✅ Soporte Markdown v2 con anuncio de título H1 - HECHO
-5. ✅ Sistema de dirección (`scripts/aplicar_direccion.py` + `scripts/verificar_direccion.py`) - HECHO
-6. ✅ Detector de personajes corregido (divide por líneas, detecta 7 personajes del capítulo 2 de EL QUINTO SOL) - HECHO
-6. 🔲 Verificar GUI v2 en pantalla real (QStackedWidget 5 secciones, transporte con WaveformView, toasts, contraste texto blanco) - PENDIENTE (usuario)
-7. 🔲 Probar clonación XTTS desde la GUI: asignar perfil de voz clonada a personaje, luego generar - PENDIENTE
-8. 🔲 Probar con un libro más largo y EPUB/PDF - PENDIENTE
-9. 🔲 Importar guion.md de EL QUINTO SOL y verificar 6 personajes, 99 segmentos + anuncio de título - PENDIENTE (esperando archivo del usuario)
-10. 🔲 Aplicar direccion-larga.csv y generar primera escena como prueba de pipeline - PENDIENTE (esperando archivo del usuario)
+- Pronunciación en español con Kokoro fp16: "baja" suena como "paja", nombres propios enredados. Limitación del G2P (Misaki/espeak-ng), no del código.
+- Ruta doble de BD (clone_store vs database) si el repo se clona fuera de /home/aegis2 — ver riesgo en la sección Electron.
+- El CSP del desktop fija media/connect a 127.0.0.1:8765; si se cambia AUREA_PORT hay que actualizar index.html.
 
 ## Regla de trabajo (compacción)
 En cada pausa natural, revisar el consumo de contexto. Si supera ~70 %, escribir/actualizar `STATE.md` antes de continuar: qué se construye, qué está hecho (rutas exactas), qué falta, decisiones y siguiente paso. Al iniciar o reanudar, leer primero `STATE.md`; si no existe, partir de cero sin asumir progreso previo (no es error).

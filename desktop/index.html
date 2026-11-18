@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; connect-src http://127.0.0.1:8765; media-src http://127.0.0.1:8765; img-src 'self' data:; style-src 'self' 'unsafe-inline'">
+  <title>AUREA Studio</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">◆</span> AUREA</div>
+      <nav id="nav">
+        <button class="nav-item active" data-view="library"><span class="ico">▣</span> Biblioteca</button>
+        <button class="nav-item" data-view="studio"><span class="ico">◉</span> Estudio</button>
+        <button class="nav-item" data-view="cast"><span class="ico">☰</span> Reparto</button>
+        <button class="nav-item" data-view="voices"><span class="ico">≋</span> Voces</button>
+      </nav>
+      <div class="sidebar-foot">
+        <span id="conn-dot" class="dot dot-wait"></span>
+        <span id="conn-label" class="mono">conectando…</span>
+      </div>
+    </aside>
+
+    <div class="main">
+      <div id="jobbar" class="jobbar" hidden>
+        <span id="job-kind" class="chip chip-cyan"></span>
+        <div class="bar"><div id="job-fill" class="bar-fill"></div></div>
+        <span id="job-msg" class="job-msg mono"></span>
+      </div>
+
+      <main id="view"></main>
+
+      <footer class="transport">
+        <button id="btn-play" class="btn btn-icon" title="Reproducir / Pausa">▶</button>
+        <div class="wave-wrap">
+          <canvas id="wave"></canvas>
+          <div id="wave-progress" class="wave-progress"></div>
+        </div>
+        <div class="tinfo">
+          <div id="t-title" class="t-title">Sin audio cargado</div>
+          <div id="t-time" class="t-time mono">0:00 / 0:00</div>
+        </div>
+      </footer>
+    </div>
+  </div>
+
+  <div id="toasts"></div>
+  <audio id="player" preload="metadata"></audio>
+  <script src="app.js"></script>
+</body>
+</html>

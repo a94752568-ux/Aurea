@@ -1,0 +1,14 @@
+{
+  "name": "aurea-studio",
+  "version": "0.6.0",
+  "description": "AUREA Audiobook Studio — escritorio Electron con acabado Neon HUD",
+  "main": "electron/main.js",
+  "author": "Alberto Sedeño",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}
