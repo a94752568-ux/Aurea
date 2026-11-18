@@ -14,7 +14,7 @@ import soundfile as sf
 from .database import Database
 from .segmentation import gain_for, segmentize
 from ..casting.cast_manager import CastManager
-from ..tts.kokoro_adapter import KokoroAdapter
+from ..tts.kokoro_adapter import KokoroAdapter, VOICES_ES
 from ..voice import clone_store
 from ..voice.xtts_adapter import XTTSAdapter
 
@@ -110,7 +110,7 @@ def run_generation(chapter, voice, speed, force=False,
                 t0 = time.perf_counter()
                 use_xtts = (eng == "xtts")
                 sample = clone_map.get(seg.character_id) if use_xtts else None
-                if not use_xtts and v not in KokoroAdapter.VOICES_ES:
+                if not use_xtts and v not in VOICES_ES:
                     # Defensa: una voz inválida guardada en la BD no debe
                     # tumbar el job entero; avisa y usa la voz del narrador.
                     on_progress(0, f"Voz '{v}' no existe en Kokoro; "
