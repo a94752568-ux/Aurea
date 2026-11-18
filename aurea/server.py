@@ -26,7 +26,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from aurea.core.database import Database          # noqa: E402
-from aurea.core.engine import run_generation      # noqa: E402
+from aurea.core.engine import assemble_chapter, run_generation  # noqa: E402
 from aurea.core.segmentation import clean_segment_text, segmentize  # noqa: E402
 from aurea.direction.engine import run_direction  # noqa: E402
 from aurea.casting.cast_manager import CastManager    # noqa: E402
@@ -360,6 +360,18 @@ class Handler(BaseHTTPRequestHandler):
                  "(regenera para actualizar el audio)")
             return self._send(200, {"cleaned": cleaned})
 
+        # Unir los segmentos ya generados en el audio del capítulo (sin TTS)
+        if len(parts) == 4 and parts[1] == "chapters" and parts[3] == "assemble":
+            cid = int(parts[2])
+            db = Database()
+            ch = db.chapter(cid)
+            if not ch:
+                return self._err(404, "Capítulo no encontrado")
+            started = _start_job(
+                "assemble", cid,
+                lambda op, od, of: assemble_chapter(ch, on_progress=op,
+                                                    on_done=od, on_failed=of))
+            return self._accept(started)
         # Dirigir capítulo (job)
         if len(parts) == 4 and parts[1] == "chapters" and parts[3] == "direct":
             cid = int(parts[2])

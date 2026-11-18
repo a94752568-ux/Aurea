@@ -63,6 +63,48 @@ def concat_segments(segs, wav_path):
     return wav_path
 
 
+def assemble_chapter(chapter, on_progress=None, on_failed=None, on_done=None):
+    """Une los WAV de los segmentos ya generados en el audio del capítulo,
+    SIN sintetizar nada. Útil tras una generación interrumpida, tras una
+    limpieza de tags, o para re-pegar con las pausas dirigidas nuevas:
+    es la unión final sin volver a pagar el costo TTS (usa la caché)."""
+    on_progress = on_progress or (lambda pct, msg: None)
+    on_failed = on_failed or (lambda msg: None)
+    on_done = on_done or (lambda msg: None)
+
+    try:
+        db = Database()
+        book_id = chapter.book_id
+        out_dir = Path.home() / "aurea" / "output" / f"book_{book_id}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        wav_path = out_dir / f"cap_{chapter.idx:03d}.wav"
+
+        segs = db.segments(chapter.id)
+        with_audio = [s for s in segs
+                      if s.wav_path and Path(s.wav_path).exists()]
+        if not segs:
+            on_failed("Sin segmentos: crea los segmentos primero")
+            return
+        if not with_audio:
+            on_failed("Ningún segmento tiene audio todavía: genera primero")
+            return
+
+        on_progress(0, f"Uniendo {len(with_audio)}/{len(segs)} segmentos…")
+        final_wav = concat_segments(segs, wav_path)
+        if final_wav:
+            target = Path.home() / "aurea" / "output" / "latest.wav"
+            try:
+                shutil.copy2(str(final_wav), target)
+            except Exception:
+                pass
+        missing = len(segs) - len(with_audio)
+        note = f" ({missing} segmentos sin audio, no incluidos)" if missing else ""
+        on_done(f"Cap {chapter.idx:03d} unido → {final_wav}{note}")
+
+    except Exception as e:  # noqa: BLE001
+        on_failed(f"{type(e).__name__}: {e}")
+
+
 def _synth_kokoro(adapter, seg, v, vsp, pace, fallback, cast, on_progress):
     """Sintetiza con Kokoro con red de seguridad: si la voz del personaje
     no existe en el bin de voces, se corrige en la BD y se reintenta.

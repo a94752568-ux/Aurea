@@ -100,6 +100,7 @@ const KIND_LABEL = {
   generate: 'GENERANDO',
   direction: 'DIRIGIENDO',
   'direction+ollama': 'DIRIGIENDO + OLLAMA',
+  assemble: 'UNIENDO',
 };
 
 function renderJob(job) {
@@ -325,6 +326,15 @@ function renderChapterDetail(polling = false) {
       startPolling();
     } catch (e) { toast(e.message, 'err'); }
   };
+  const btnJoin = el('button', 'btn btn-ghost', '🔗 Unir');
+  btnJoin.title = 'Une todos los fragmentos ya generados en el audio del capítulo, sin regenerar nada';
+  btnJoin.onclick = async () => {
+    try {
+      await post(`/api/chapters/${ch.id}/assemble`);
+      toast('Unión en marcha…');
+      startPolling();
+    } catch (e) { toast(e.message, 'err'); }
+  };
   const btnListen = el('button', 'btn', '🔊 Escuchar');
   btnListen.onclick = () => {
     if (!d.latest_audio) { toast('Aún no hay audio del capítulo'); return; }
@@ -339,7 +349,7 @@ function renderChapterDetail(polling = false) {
     startPolling();
   };
   bar.append(btnDetect, btnEnsure, btnClean, lbl, btnDirect,
-             el('span', 'spacer'), btnListen, btnGen, btnForce);
+             el('span', 'spacer'), btnJoin, btnListen, btnGen, btnForce);
   right.appendChild(bar);
 
   const list = el('div', 'seg-list');
