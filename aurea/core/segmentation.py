@@ -84,8 +84,9 @@ def segmentize(text, use_cast):
                     pause = pause_after if sub_idx == len(sub_chunks) - 1 else None
                     out.append((part["kind"], part["speaker"], sub_chunk, pause))
             else:
-                # Narración: comportamiento original con fragmentos
-                fragments = _split_markers(part["text"])
+                # Narración: mismos fragmentos, pero quitando etiquetas de
+                # habla tipo "—dijo Narrador." que el guion dejó en el párrafo
+                fragments = _split_markers(_strip_speech_tag(part["text"]))
                 for frag in fragments:
                     sub_chunks = list(_split_chunk(frag["text"]))
                     for sub_idx, sub_chunk in enumerate(sub_chunks):

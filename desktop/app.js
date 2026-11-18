@@ -9,6 +9,7 @@ const A = window.aurea;
 const $ = (sel, root = document) => root.querySelector(sel);
 
 const state = {
+  view: 'library',
   bookId: null,
   bookTitle: '',
   chapterId: null,
@@ -25,11 +26,6 @@ function el(tag, cls, text) {
   if (cls) e.className = cls;
   if (text !== undefined) e.textContent = text;
   return e;
-}
-
-function esc(s) {
-  return String(s ?? '').replace(/[&<>"']/g,
-    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 function fmtTime(sec) {
@@ -82,13 +78,21 @@ async function healthCheck() {
 }
 
 /* ---------------- jobs / barra ---------------- */
+const KIND_LABEL = {
+  generate: 'GENERANDO',
+  direction: 'DIRIGIENDO',
+  'direction+ollama': 'DIRIGIENDO + OLLAMA',
+};
+
 function renderJob(job) {
   const bar = $('#jobbar');
-  bar.hidden = false;
+  bar.hidden = job.state === 'idle';
   bar.className = 'jobbar ' + job.state;
-  $('#job-kind').textContent = job.kind || '';
-  $('#job-fill').style.width = (job.progress || 0) + '%';
-  $('#job-msg').textContent = job.state === 'idle' ? '' : (job.message || '');
+  $('#job-kind').textContent = KIND_LABEL[job.kind] || (job.kind || '').toUpperCase();
+  const pct = job.state === 'running' ? (job.progress || 0) : 100;
+  $('#job-fill').style.width = pct + '%';
+  $('#job-msg').textContent = job.message || '';
+  document.body.classList.toggle('job-running', job.state === 'running');
 }
 
 async function startPolling() {
@@ -161,8 +165,7 @@ async function viewLibrary() {
     const row = el('div', 'book-actions');
     const open = el('button', 'btn btn-ghost', 'Abrir');
     open.onclick = () => { state.bookId = b.id; state.bookTitle = b.title; viewStudio(); };
-    const delBtn = el('button', 'btn btn-ghost', 'Eliminar');
-    delBtn.classList.add('danger');
+    const delBtn = el('button', 'btn btn-ghost danger', 'Eliminar');
     delBtn.onclick = async () => {
       if (!confirm('¿Eliminar "' + b.title + '" y su audio generado?')) return;
       try { await del('/api/books/' + b.id); toast('Libro eliminado', 'ok'); }
@@ -202,19 +205,22 @@ async function viewStudio() {
   if (!state.chapterId && chapters.length) state.chapterId = chapters[0].id;
 
   const wrap = el('div', 'studio');
-  const left = el('div', null);
+  const left = el('div');
   const listHead = el('div', 'view-head');
-  const h1 = el('h1', null, state.bookTitle);
+  const h1 = el('h1', 'ellipsis', state.bookTitle);
+  h1.title = state.bookTitle;
   h1.style.cursor = 'pointer';
   h1.onclick = viewLibrary;
   listHead.appendChild(h1);
-  listHead.style.gridArea = 'auto';
   left.appendChild(listHead);
+  listHead.style.marginBottom = '12px';
   const list = el('div', 'ch-list');
   if (!chapters.length) list.appendChild(el('div', 'empty', 'Este libro no tiene capítulos.'));
   for (const c of chapters) {
     const item = el('div', 'ch-item' + (c.id === state.chapterId ? ' sel' : ''));
-    item.appendChild(el('div', 'ch-title', `${c.idx + 1}. ${c.title}`));
+    const ct = el('div', 'ch-title ellipsis', `${c.idx + 1}. ${c.title}`);
+    ct.title = c.title;
+    item.appendChild(ct);
     const meta = el('div', 'ch-meta');
     const pct = c.segments ? Math.round(100 * c.done / c.segments) : 0;
     const bar = el('div', 'bar mini-bar');
@@ -227,7 +233,7 @@ async function viewStudio() {
     list.appendChild(item);
   }
   left.appendChild(list);
-  const right = el('div', null);
+  const right = el('div');
   right.id = 'chapter-detail';
   wrap.append(left, right);
   v.appendChild(wrap);
@@ -247,11 +253,15 @@ function renderChapterDetail(polling = false) {
   const d = state.chapterData;
   const right = $('#chapter-detail');
   if (!d || !right) return;
+  const scroller = $('#view');
+  const savedScroll = scroller.scrollTop;
   right.innerHTML = '';
   const ch = d.chapter;
 
   const head = el('div', 'chapter-head');
-  head.appendChild(el('h2', null, `${ch.idx + 1}. ${ch.title}`));
+  const ht = el('h2', 'ellipsis', `${ch.idx + 1}. ${ch.title}`);
+  ht.title = ch.title;
+  head.appendChild(ht);
   head.appendChild(el('span', 'mono',
     `${d.done}/${d.total} segmentos con audio`));
   right.appendChild(head);
@@ -283,6 +293,11 @@ function renderChapterDetail(polling = false) {
       startPolling();
     } catch (e) { toast(e.message, 'err'); }
   };
+  const btnListen = el('button', 'btn', '🔊 Escuchar');
+  btnListen.onclick = () => {
+    if (!d.latest_audio) { toast('Aún no hay audio del capítulo'); return; }
+    playAudio(d.latest_audio, `Cap ${ch.idx + 1} · ${ch.title}`);
+  };
   const btnForce = el('button', 'btn btn-magenta', '↻ Regenerar todo');
   btnForce.onclick = async () => {
     if (!confirm('Regenerar todos los segmentos del capítulo (borra el audio cacheado)?')) return;
@@ -291,14 +306,9 @@ function renderChapterDetail(polling = false) {
     toast('Regenerando…');
     startPolling();
   };
-  bar.append(btnDetect, btnEnsure, lbl, btnDirect, el('span', 'spacer'), btnGen, btnForce);
+  bar.append(btnDetect, btnEnsure, lbl, btnDirect, el('span', 'spacer'),
+             btnListen, btnGen, btnForce);
   right.appendChild(bar);
-
-  if (d.latest_audio) {
-    const btnListen = el('button', 'btn', '🔊 Escuchar capítulo');
-    btnListen.onclick = () => playAudio(d.latest_audio, `Cap ${ch.idx + 1} · ${ch.title}`);
-    bar.insertBefore(btnListen, btnForce);
-  }
 
   const list = el('div', 'seg-list');
   if (!d.segments.length) {
@@ -307,6 +317,7 @@ function renderChapterDetail(polling = false) {
   }
   for (const s of d.segments) list.appendChild(segRow(s));
   right.appendChild(list);
+  scroller.scrollTop = savedScroll;
 }
 
 function segRow(s) {
@@ -315,7 +326,11 @@ function segRow(s) {
   const body = el('div', 'seg-body');
   body.appendChild(el('div', 'seg-text', s.text));
   const chips = el('div', 'seg-chips');
-  if (s.character_name) chips.appendChild(el('span', 'chip chip-cyan', s.character_name));
+  if (s.character_name) {
+    chips.appendChild(el('span',
+      'chip ' + (s.character_name === 'Narrador' ? 'chip-amber' : 'chip-cyan'),
+      s.character_name));
+  }
   if (s.directed) {
     chips.appendChild(el('span', 'chip', s.emotion || 'neutral'));
     chips.appendChild(el('span', 'chip', s.delivery || 'normal'));
@@ -368,15 +383,20 @@ async function viewCast() {
   head.appendChild(btnDetect);
   v.appendChild(head);
 
-  const chars = (state.chapterData && state.chapterData.chapter &&
-                 state.chapterData.chapter.book_id === state.bookId &&
-                 state.chapterData.characters) ||
-    await get(`/api/books/${state.bookId}/characters`).catch(() => []);
+  let chars = [];
+  if (state.chapterData && state.chapterData.chapter &&
+      state.chapterData.chapter.book_id === state.bookId &&
+      state.chapterData.characters) {
+    chars = state.chapterData.characters;
+  } else {
+    try { chars = await get(`/api/books/${state.bookId}/characters`); }
+    catch (_) { chars = []; }
+  }
   const profiles = await get('/api/voice-profiles');
   state.profiles = profiles;
 
   const table = el('div', 'table');
-  if (!chars || !chars.length) {
+  if (!chars.length) {
     table.appendChild(el('div', 'empty',
       'Sin reparto. Abre un capítulo en Estudio y pulsa "Detectar reparto".'));
     v.appendChild(table);
@@ -389,6 +409,10 @@ async function viewCast() {
     const name = el('div', 'name', c.name);
     if (c.is_narrator) name.appendChild(el('span', 'chip chip-amber', 'Narrador'));
     if (c.engine === 'xtts') name.appendChild(el('span', 'chip chip-magenta', 'Clon'));
+    if (c.engine !== 'xtts' && !names[c.voice]) {
+      name.appendChild(el('span', 'chip chip-magenta',
+        `voz inválida: ${c.voice}`));
+    }
     row.appendChild(name);
 
     const engSel = el('select');
@@ -493,10 +517,13 @@ async function viewVoices() {
     const card = el('div', 'profile-card hud');
     card.appendChild(el('div', 'pname', p.name));
     const chips = el('div', 'profile-chips');
-    chips.appendChild(el('span', 'chip chip-cyan', p.name ? p.sample_path.split('/').pop() : ''));
+    chips.appendChild(el('span', 'chip chip-cyan',
+      String(p.sample_path || '').split('/').pop()));
     card.appendChild(chips);
-    card.appendChild(el('div', 'mono', p.sample_path));
-    card.lastChild.style.cssText = 'font-size:10px;color:var(--muted);margin-bottom:12px;word-break:break-all;';
+    const pathLine = el('div', 'mono', p.sample_path || '');
+    pathLine.style.cssText =
+      'font-size:10px;color:var(--muted);margin-bottom:12px;word-break:break-all;';
+    card.appendChild(pathLine);
     const delBtn = el('button', 'btn btn-magenta', 'Eliminar');
     delBtn.onclick = async () => {
       if (!confirm('¿Eliminar el perfil "' + p.name + '"?')) return;
@@ -539,24 +566,34 @@ player.addEventListener('ended', setPlayIcon);
 
 async function loadWave(url) {
   try {
-    const res = await fetch(A.API + '/api/audio/peaks?path=' + encodeURIComponent(
-      new URL(A.API + url).searchParams.get('path') || '') + '&n=240');
+    const p = new URL(A.API + url).searchParams.get('path') || '';
+    const res = await fetch(A.API + '/api/audio/peaks?path=' +
+      encodeURIComponent(p) + '&n=240');
     const data = await res.json();
     state.wavePeaks = data.peaks || [];
     drawWave();
-  } catch (_) { state.wavePeaks = null; }
+  } catch (_) { state.wavePeaks = null; drawWave(); }
 }
 
 function drawWave() {
   const canvas = waveCanvas;
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (!w || !h) return;
   canvas.width = w * dpr; canvas.height = h * dpr;
   const ctx = canvas.getContext('2d');
   ctx.scale(dpr, dpr);
   ctx.clearRect(0, 0, w, h);
   const peaks = state.wavePeaks;
-  if (!peaks || !peaks.length) return;
+  if (!peaks || !peaks.length) {
+    // Línea base tenue mientras no hay audio cargado
+    ctx.strokeStyle = 'rgba(126, 147, 180, 0.25)';
+    ctx.beginPath();
+    ctx.moveTo(0, h / 2);
+    ctx.lineTo(w, h / 2);
+    ctx.stroke();
+    return;
+  }
   const n = peaks.length;
   const bw = Math.max(2, w / n - 1);
   ctx.fillStyle = 'rgba(0, 243, 255, 0.55)';
@@ -567,6 +604,7 @@ function drawWave() {
 }
 
 window.addEventListener('resize', drawWave);
+drawWave();
 
 player.addEventListener('timeupdate', () => {
   const dur = player.duration || 1;
