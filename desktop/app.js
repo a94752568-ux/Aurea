@@ -567,7 +567,13 @@ async function viewVoices() {
   }
   for (const p of profiles) {
     const card = el('div', 'profile-card hud');
-    card.appendChild(el('div', 'pname', p.name));
+    const head = el('div', 'profile-head');
+    head.appendChild(el('div', 'pname', p.name));
+    const play = el('button', 'btn btn-icon', '▶');
+    play.title = 'Escuchar la muestra de esta voz';
+    play.onclick = () => playAudio(`/api/voice-profiles/${p.id}/audio`, `${p.name} (muestra)`);
+    head.appendChild(play);
+    card.appendChild(head);
     const chips = el('div', 'profile-chips');
     chips.appendChild(el('span', 'chip chip-cyan',
       String(p.sample_path || '').split('/').pop()));
@@ -577,6 +583,14 @@ async function viewVoices() {
       chips.appendChild(el('span', 'chip chip-amber', 'muestra temporal'));
     }
     card.appendChild(chips);
+    const uses = p.used_by || [];
+    for (const u of uses) {
+      chips.appendChild(el('span', 'chip chip-green',
+        u.character + (u.is_narrator ? " ★" : "") + " · " + u.book));
+    }
+    if (!uses.length) {
+      chips.appendChild(el('span', 'chip', 'sin asignar'));
+    }
     const pathLine = el('div', 'mono', sp);
     pathLine.style.cssText =
       'font-size:10px;color:var(--muted);margin-bottom:12px;word-break:break-all;';

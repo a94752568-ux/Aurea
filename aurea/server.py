@@ -196,7 +196,36 @@ class Handler(BaseHTTPRequestHandler):
             db = Database()
             return self._send(200, [_book_dict(b) for b in db.books()])
         if path == "/api/voice-profiles":
-            return self._send(200, clone_store.list_profiles())
+            profiles = clone_store.list_profiles()
+            # ¿A qué personajes se aplica cada perfil? (lectura final)
+            db = Database()
+            usage: dict = {}
+            for b in db.books():
+                for c in db.characters(b.id):
+                    pid = getattr(c, "voice_profile_id", None)
+                    if pid:
+                        usage.setdefault(pid, []).append(
+                            {"book": b.title, "character": c.name,
+                             "is_narrator": c.is_narrator})
+            for p in profiles:
+                p["used_by"] = usage.get(p["id"], [])
+            return self._send(200, profiles)
+
+        # /api/voice-profiles/{id}/audio —— escuchar la muestra del perfil
+        if len(parts) == 4 and parts[0] == "api" \
+                and parts[1] == "voice-profiles" and parts[3] == "audio":
+            try:
+                pid = int(parts[2])
+            except ValueError:
+                return self._err(400, "ID de perfil inválido")
+            prof = clone_store.get_profile(pid)
+            if not prof:
+                return self._err(404, "Perfil de voz no encontrado")
+            sp = Path(prof.get("sample_path") or "")
+            if not sp.exists():
+                return self._err(404, "La muestra del perfil no existe en disco"
+                                      " (¿muestra temporal borrada?)")
+            return self._send_file(sp)
 
         # /api/books/{id}/chapters
         if len(parts) == 4 and parts[0] == "api" and parts[1] == "books" \
@@ -495,6 +524,24 @@ class Handler(BaseHTTPRequestHandler):
         if not rp.exists():
             return None, "Archivo no encontrado"
         return rp, None
+
+    def _send_file(self, rp):
+        """Sirve un fichero (WAV de muestra de voz) como respuesta simple."""
+        size = rp.stat().st_size
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/wav")
+        self.send_header("Content-Length", str(size))
+        self.send_header("Accept-Ranges", "none")
+        self.end_headers()
+        with open(rp, "rb") as f:
+            while True:
+                chunk = f.read(65536)
+                if not chunk:
+                    break
+                try:
+                    self.wfile.write(chunk)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
 
     def _serve_audio(self, qs):
         rp, err = self._resolve_output_wav(qs)
