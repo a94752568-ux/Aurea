@@ -278,6 +278,11 @@ async function loadChapter(id) {
     (elm, i) => elm.classList.toggle('sel', state.chapters[i] && state.chapters[i].id === id));
   try { state.chapterData = await get('/api/chapters/' + id); }
   catch (e) { toast(e.message, 'err'); return; }
+  if (!(state.profiles || []).length) {
+    try { state.profiles = await get('/api/voice-profiles'); } catch (_) {}
+  }
+  state.charInfo = {};
+  (state.chapterData.characters || []).forEach((c) => { state.charInfo[c.id] = c; });
   renderChapterDetail();
 }
 
@@ -385,6 +390,16 @@ function segRow(s) {
     chips.appendChild(el('span',
       'chip ' + (s.character_name === 'Narrador' ? 'chip-amber' : 'chip-cyan'),
       s.character_name));
+  }
+  const ci = (state.charInfo || {})[s.character_id];
+  if (ci) {
+    const prof = (state.profiles || []).find((p) => p.id === ci.voice_profile_id);
+    const vlabel = ci.engine === 'xtts'
+      ? ('clon: ' + (prof ? prof.name : '#' + ci.voice_profile_id))
+      : (ci.voice || '');
+    if (vlabel) chips.appendChild(el('span',
+      'chip ' + (ci.engine === 'xtts' ? 'chip-magenta' : 'chip-amber'),
+      'voz: ' + vlabel));
   }
   if (s.directed) {
     chips.appendChild(el('span', 'chip', s.emotion || 'neutral'));
