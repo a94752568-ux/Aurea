@@ -42,13 +42,24 @@ def _strip_speech_tag(para):
     m = end.search(para)
     if m:
         before = para[:m.start()].rstrip()
-        if re.search(r'[.!?…]\s*$', before):
-            para = before
+        # La atribución se elimina SIEMPRE que cierra el final con
+        # verbo+Nombre: ya NO exigimos puntuación previa, porque los
+        # guiones (EL QUINTO SOL) pegan el tag sin punto:
+        # "…el mundo sigue —dijo Iztacxochitl."  (fix ronda 3)
+        para = before
+        if before and not re.search(r'[.!?…,:;]\s*$', before):
+            # Si quedó sin puntuación final, se añade un punto
+            para = before + "."
     # Start: verbo al inicio "—dijo Nombre, texto" (requiere texto después)
     start = re.compile(
-        rf"^—\s*(?i:\b(?:{SPEECH_VERBS})\b)\s+(?:el|la|los|las|un|una|su|al)?\s*({NAME})[.,]?\s+.+"
+        rf"^—\s*(?i:\b(?:{SPEECH_VERBS})\b)\s+(?:el|la|los|las|un|una|su|al)?\s*({NAME})[.,]?\s*"
     )
-    para = start.sub("", para)
+    m = start.match(para)
+    # Bug v0.6 corregido: start.sub("") borraba TAMBIÉN todo el diálogo
+    # cuando la línea abría con "—dijo Nombre, texto…". Ahora solo se
+    # quita la etiqueta y el texto del personaje se conserva.
+    if m and para[m.end():].strip():
+        para = para[m.end():].strip()
     # Strip leading em dash that marks Spanish dialogue (—¿Texto)
     if para.startswith("—"):
         para = para[1:].lstrip()
