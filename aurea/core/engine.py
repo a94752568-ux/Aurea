@@ -229,7 +229,7 @@ def run_generation(chapter, voice, speed, force=False,
                     samples, sr = xtts.generate(
                         clean_segment_text(seg.text),
                         speaker_wav=sample, speed=vsp * pace)
-                    voice_tag = "clon"
+                    voice_tag = f"clon {v}"
                 else:
                     if use_xtts:
                         on_progress(0, f"Clon sin muestra usable en seg "
