@@ -20,6 +20,7 @@ const state = {
   kokoroVoices: ['em_alex', 'ef_dora', 'em_santa'],
   pollTimer: null,
   wavePeaks: null,
+  hoverFrac: null,
 };
 
 /* ---------------- utilidades ---------------- */
@@ -302,6 +303,24 @@ function renderChapterDetail(polling = false) {
   head.appendChild(el('span', 'mono',
     `${d.done}/${d.total} segmentos con audio`));
   right.appendChild(head);
+
+  // Tira de timeline: un cubo por segmento, se enciende en vivo
+  // durante la generación (polling) según su estado real.
+  if (d.segments.length) {
+    const tl = el('div', 'seg-timeline');
+    tl.title = `Timeline del capítulo: ${d.done}/${d.total} con audio`;
+    for (const s of d.segments) {
+      const cell = el('span', 'seg-t'
+        + (s.has_audio ? ' done' : ' pending')
+        + (s.kind === 'dialogue' ? ' dialogue' : ' narration'));
+      cell.title = `Seg ${s.idx + 1}`
+        + (s.character_name ? ` · ${s.character_name}` : '')
+        + ` · ${s.has_audio ? 'con audio' : 'pendiente'}`
+        + (s.voice_tag ? ` · ${s.voice_tag}` : '');
+      tl.appendChild(cell);
+    }
+    right.appendChild(tl);
+  }
 
   const bar = el('div', 'actionbar');
   const btnDetect = el('button', 'btn', '⛳ Detectar reparto');
@@ -739,9 +758,9 @@ function setPlayIcon() {
   $('#btn-play').textContent = player.paused ? '▶' : '❚❚';
 }
 
-player.addEventListener('play', setPlayIcon);
-player.addEventListener('pause', setPlayIcon);
-player.addEventListener('ended', setPlayIcon);
+player.addEventListener('play', () => { setPlayIcon(); startWaveLoop(); });
+player.addEventListener('pause', () => { setPlayIcon(); stopWaveLoop(); });
+player.addEventListener('ended', () => { setPlayIcon(); stopWaveLoop(); });
 
 async function loadWave(url) {
   try {
@@ -754,7 +773,13 @@ async function loadWave(url) {
   } catch (_) { state.wavePeaks = null; drawWave(); }
 }
 
+/* Visualización en vivo: barras en dos zonas (lo ya reproducido en cian
+   brillante, lo restante apagado), cabeza de lectura luminosa y redibujado
+   suave con requestAnimationFrame mientras suena el audio. */
+let waveRaf = null;
+
 function drawWave() {
+  if (waveRaf) cancelAnimationFrame(waveRaf);
   const canvas = waveCanvas;
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth, h = canvas.clientHeight;
@@ -765,39 +790,101 @@ function drawWave() {
   ctx.clearRect(0, 0, w, h);
   const peaks = state.wavePeaks;
   if (!peaks || !peaks.length) {
-    // Línea base tenue mientras no hay audio cargado
-    ctx.strokeStyle = 'rgba(126, 147, 180, 0.25)';
+    // Línea base tenue con leve "pulso" mientras no hay audio cargado
+    const t = (Date.now() % 2000) / 2000;
+    const pulse = 0.18 + 0.10 * Math.sin(t * Math.PI * 2);
+    ctx.strokeStyle = 'rgba(126, 147, 180, ' + pulse.toFixed(2) + ')';
+    ctx.lineWidth = 1.5;
     ctx.beginPath();
     ctx.moveTo(0, h / 2);
     ctx.lineTo(w, h / 2);
     ctx.stroke();
     return;
   }
+
+  const dur = player.duration || 0;
+  const prog = dur ? Math.min(1, (player.currentTime || 0) / dur) : 0;
   const n = peaks.length;
   const bw = Math.max(2, w / n - 1);
-  ctx.fillStyle = 'rgba(0, 243, 255, 0.55)';
+  const playedX = prog * w;
+
+  // Barras: dos zonas de color según el progreso real del <audio>
   for (let i = 0; i < n; i++) {
+    const x = i * (bw + 1);
     const bH = Math.max(2, peaks[i] * h * 0.9);
-    ctx.fillRect(i * (bw + 1), (h - bH) / 2, bw, bH);
+    const mid = x + bw / 2;
+    const played = mid <= playedX;
+    const peak = peaks[i];
+    if (played) {
+      // Degradado cian→verde según altura (más alto = más brillante)
+      const glow = Math.min(1, 0.55 + peak * 0.6);
+      ctx.fillStyle = `rgba(${peak > 0.5 ? '45, 255, 158' : '0, 243, 255'}, ${glow.toFixed(2)})`;
+      if (peak > 0.5) {
+        ctx.shadowColor = 'rgba(45, 255, 158, 0.6)';
+        ctx.shadowBlur = 6;
+      }
+    } else {
+      ctx.fillStyle = 'rgba(126, 147, 180, 0.32)';
+      ctx.shadowBlur = 0;
+    }
+    ctx.fillRect(x, (h - bH) / 2, bw, bH);
+    ctx.shadowBlur = 0;
   }
+
+  // Cabeza de lectura: línea con halo
+  if (prog > 0 && prog < 1) {
+    ctx.fillStyle = '#e8fbff';
+    ctx.shadowColor = 'rgba(0, 243, 255, 0.9)';
+    ctx.shadowBlur = 10;
+    ctx.fillRect(playedX - 1, 2, 2, h - 4);
+    ctx.shadowBlur = 0;
+  }
+
+  // Línea de hover (previsualización del scrub)
+  if (state.hoverFrac != null) {
+    ctx.fillStyle = 'rgba(255, 176, 32, 0.45)';
+    ctx.fillRect(state.hoverFrac * w - 0.5, 0, 1, h);
+  }
+}
+
+function startWaveLoop() {
+  if (waveRaf) cancelAnimationFrame(waveRaf);
+  const tick = () => {
+    drawWave();
+    waveRaf = requestAnimationFrame(tick);
+  };
+  waveRaf = requestAnimationFrame(tick);
+}
+
+function stopWaveLoop() {
+  if (waveRaf) { cancelAnimationFrame(waveRaf); waveRaf = null; }
+  drawWave();
 }
 
 window.addEventListener('resize', drawWave);
 drawWave();
 
 player.addEventListener('timeupdate', () => {
-  const dur = player.duration || 1;
-  $('#wave-progress').style.width = (100 * player.currentTime / dur) + '%';
   $('#t-time').textContent =
     fmtTime(player.currentTime) + ' / ' + fmtTime(player.duration || 0);
 });
 
-/* seek con clic en la waveform */
-document.querySelector('.wave-wrap').addEventListener('click', (ev) => {
+/* seek con clic en la waveform + hover */
+const waveWrap = document.querySelector('.wave-wrap');
+waveWrap.addEventListener('click', (ev) => {
   if (!player.duration) return;
   const rect = ev.currentTarget.getBoundingClientRect();
   const frac = Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width));
   player.currentTime = frac * player.duration;
+});
+waveWrap.addEventListener('mousemove', (ev) => {
+  const rect = ev.currentTarget.getBoundingClientRect();
+  state.hoverFrac = Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width));
+  if (!waveRaf) drawWave();
+});
+waveWrap.addEventListener('mouseleave', () => {
+  state.hoverFrac = null;
+  if (!waveRaf) drawWave();
 });
 
 /* ---------------- arranque ---------------- */

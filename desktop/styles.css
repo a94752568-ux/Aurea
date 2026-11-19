@@ -460,6 +460,42 @@ body.job-running .form-row .btn { opacity: 0.45; pointer-events: none; }
 .chapter-head h2 { font: 700 17px/1.2 var(--sans); flex: 1; min-width: 0; }
 .chapter-head .mono { font-size: 11px; color: var(--muted); flex-shrink: 0; }
 
+/* tira de timeline de segmentos (vida durante la generación) */
+.seg-timeline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  background: rgba(13, 18, 32, 0.5);
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+}
+
+.seg-t {
+  width: 9px;
+  height: 16px;
+  border-radius: 2px;
+  background: #0e1830;
+  border: 1px solid #16233e;
+  transition: background 0.3s, box-shadow 0.3s;
+}
+
+.seg-t.pending { opacity: 0.55; }
+
+.seg-t.done {
+  background: linear-gradient(180deg, rgba(0, 243, 255, 0.9), rgba(0, 243, 255, 0.45));
+  border-color: rgba(0, 243, 255, 0.7);
+  opacity: 1;
+}
+
+.seg-t.done.dialogue {
+  background: linear-gradient(180deg, rgba(45, 255, 158, 0.9), rgba(45, 255, 158, 0.45));
+  border-color: rgba(45, 255, 158, 0.7);
+}
+
+.seg-t:hover { box-shadow: 0 0 8px rgba(0, 243, 255, 0.7); }
+
 .actionbar {
   display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
   margin-bottom: 20px;
