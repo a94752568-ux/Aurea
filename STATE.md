@@ -1,6 +1,7 @@
 # AUREA — Estado compactado (STATE.md)
 
 Generado: 2026-11-12. Actualizado tras implementar mejoras para EL QUINTO SOL (reglas de pausas v2, soporte Markdown v2, sistema de dirección, clonación XTTS integrada).
+**Actualizado 2026-11-21: reparación de auditoría (Fases 1–5) + acabado cyberpunk premium + versión 0.5.0.** Ver la sección "Reparación 2026-11-20/21" al final.
 Uso: leer este archivo y la memoria antes de seguir trabajando. No rehacer lo ya hecho.
 
 ## Qué se está construyendo
@@ -15,13 +16,13 @@ Fases aplicadas sobre el código en disco:
 - Fase 4c Clonación XTTS: `voice/clone_store.py`, `voice/sample_prep.py`, `voice/xtts_adapter.py`, `ui/clone_panel.py` (simplificado), `scripts/smoke_fase4c.py`. Reparte asigna voces XTTS automáticamente (`casting/cast_manager.py`). Requiere `pip install coqui-tts` + PyTorch/CPU.
 - Reglas de pausas (v2): `direction/rules.py` con vocabularios de espec 4.1 (12 emociones, 6 volúmenes, 5 ritmos), defaults de volumen por verbo (4.2), `direct_segment` rellena pausas de TODOS los segmentos (nunca NULL), prioridad marcador > hablante > puntuación > 0. `core/generator.py` (`segmentize` procesa marcadores; `_concat` honra `pause_after_ms` y elimina pausa duplicada). `core/database.py` (`add_segment` acepta `pause_after_ms`, `update_character` con `engine`/`profile_id`, `add_character_with_profile`).
 - Soporte Markdown .md (v2): `ingestion/md_reader.py` (H1=nuevo capítulo con segmento de anuncio narrador + pausa 800ms; H2/H3=corte de sección con pausa 800/500ms; `---`=800ms; limpieza de formato; listas como segmentos con pausa de coma 180ms; marcadores de pausa), `ingestion/importer.py` (registra .md), `ui/main_window.py` (.md en filtro de archivo).
-- Procesamiento de audio automático: `core/audio_processor.py` (normalización RMS, compresión, limitador, potenciador de graves, herramientas estéreo), integrado en `core/generator.py` (`process_segment` por segmento; `process_master` en `_concat`).
+- Procesamiento de audio automático: `core/audio_processor.py` (normalización RMS, compresión, limitador, potenciador de graves, herramientas estéreo). **CORREGIDO 2026-11-20 (A9):** `process_master` SÍ está integrado en `core/generator.py:_concat` (línea ~310), dentro de try/except (un fallo de procesado nunca mata el capítulo; registra aviso). Verificado de verdad: RMS crudo 0.354/0.224 → RMS final 0.127 (target 0.14). `process_segment` existe en AudioProcessor pero NO está conectado (los segmentos van en crudo a `_concat`); no afirmar lo contrario.
 - Tema Cyberpunk Neon para la GUI: `ui/theme.py` (paleta COLORS cian #00f3ff + magenta #ff00ff + texto #e8fbff + fondo #080c18, QSS global con bordes de color, `apply_dark_palette()` para QPalette Fusion oscura, `HudPanel` con esquinas bracket, `Sidebar`, `WaveformView`, `toast`). Integrado en `main_window.py` vía `apply_theme` + `apply_dark_palette`.
 - Flujo dirigir-antes-de-generar: `main_window.py:_generate_chapter_with_direction()` dirige automáticamente segmentos no dirigidos antes de generar audio. Botón "🎬 Dirigir" en página Estudio. `_ensure_segments()` crea segmentos automáticamente al importar un capítulo vacío. `DirectionWorker` + `ChapterGenerator` encadenados. Feedback con QMessageBox en todos los puntos de fallo. Primer capítulo seleccionado automáticamente al importar.
 - Clonación XTTS en reparto: `casting/cast_manager.py` (`build_cast` asigna voces Kokoro por defecto `ef_dora`/`em_santa`; las voces clonadas XTTS se asignan desde la GUI). `voice_map` devuelve `(engine, voz, velocidad)`. `ui/clone_panel.py` (flujo simplificado: importar → asignar, con selector Kokoro/XTTS). `ui/main_window.py` (página Reparto muestra voces asignadas).
 
 Archivos fuente clave (`/home/aegis2/aurea/aurea/`):
-- `__init__.py` (versión `0.4b+4c`)
+- `__init__.py` (versión `0.5.0` — única constante, leída por la ventana; antes `0.4b+4c` en `__init__.py` y `0.5` fijo en el título)
 - `core/models.py` (Character con `engine` y `voice_profile_id`; Segment con campos de dirección)
 - `core/database.py` (`add_segment` con `pause_after_ms`; `add_character_with_profile`; `update_character` con `engine`/`profile_id`; migraciones de columnas de clonación y dirección)
 - `core/generator.py` (ChapterGenerator QThread; `_concat` con `pause_after_ms`, defensa contra `[` en TTS, manejo estéreo/mono; procesamiento de audio por segmento y master final vía `audio_processor`)
@@ -48,15 +49,16 @@ BD (`/home/aegis2/aurea/aurea.db`): libros/capítulos/segmentos/personajes/voice
 | Marcador `[pausa=Xs]` / `[silencio=Xs]` | X segundos exactos | Rango 0.1–3.0s, recortado al límite. Máximo 3000 ms solo para marcadores explícitos. |
 | Cambio de hablante | 500 ms | pause_after_ms del segmento anterior. No se duplica en el generador. |
 | Punto / ? / ! | 450 ms | Base de puntuación |
-| Puntos suspensivos … | 700 ms | |
+| Puntos suspensivos … | 700 ms | Base; con pace 0.9 el valor dirigido es 777 ms (700 × 1/0.9) |
 | Coma , | 180 ms | |
 | Punto y coma / dos puntos ; : | 300 ms | |
 | Raya — | 250 ms | |
 | Sin puntuación | 180 ms | Se trata como coma |
-| Ritmo lento | ×1.5 | Multiplicador sobre puntuación |
-| Ritmo pausado | ×1.8 | |
-| Ritmo rápido | ×0.7 | |
-| Ritmo entrecortado | ×0.8 | |
+| Ritmo lento | pace 0.75 (velocidad) | Las pausas se alargan: base × (1/0.75). **Ya NO ×1.5 como multiplicador de pausa (A1).** |
+| Ritmo pausado | pace 0.85 (velocidad) | |
+| Ritmo normal | pace 1.0 (velocidad) | |
+| Ritmo rápido | pace 1.2 (velocidad) | Las pausas se acortan: base × (1/1.2) |
+| Ritmo entrecortado | pace 1.0 (velocidad) | Lo entrecortado son las pausas, no el tempo |
 | Emoción miedo/tristeza | ×1.3 | Multiplicador sobre puntuación |
 | Emoción determinación | ×1.2 | |
 | Emoción enojo/enfado | ×0.8 | |
@@ -69,16 +71,22 @@ BD (`/home/aegis2/aurea/aurea.db`): libros/capítulos/segmentos/personajes/voice
 | Emoción desesperación | ×1.25 | |
 | Emoción neutral | ×1.0 | |
 | Pregunta final de diálogo (?) | +200 ms | Sobre el valor calculado |
-| Intensidad 5 | +300 ms | Golpe dramático |
+| Intensidad ≥ 0.8 (escala 0–1) | +300 ms | Golpe dramático. **Ya NO "intensidad 5" (A2).** |
 | Último segmento de un capítulo | +800 ms | Cola final |
 | Inicio de capítulo (pause_before_ms) | 600 ms | Solo primer segmento |
 | Resto de segmentos (pause_before_ms) | 0 ms | La pausa vive en pause_after_ms del anterior |
 
+## Semántica pace / intensity (DECIDIDA 2026-11-20, no cambiar)
+- **`pace` en BD = factor de VELOCIDAD float 0.6–1.3** (lento≈0.75, pausado≈0.85, normal=1.0, rápido≈1.2, entrecortado=1.0). El generador lo usa como `speed = vspeed * pace`. En `apply_emotion_pace`, un pace float multiplica las pausas por `1/pace` (hablar más lento alarga las pausas). Los nombres de ritmo también se aceptan (`PACE_MULT` en `direction/rules.py`).
+- **`intensity` en BD = float 0–1.** El CSV de `aplicar_direccion.py` convierte 1–5 con `(n-1)/4`. La regla "+300 ms por intensidad alta" dispara con `intensity >= 0.8`.
+- Ejemplos verificados: punto+lento+miedo = 877 ms; punto+pace 0.75+miedo = 780 ms; intensidad 1.0 → 450+300 = 750 ms; intensidad 0.5 → 450 ms.
+- **Corchetes (A5):** los marcadores `[pausa=Xs]`/`[silencio=Xs]` se eliminan en `segmentize`; cualquier `[` restante es contenido legítimo (p. ej. `[risas]`) y `_concat` YA NO aborta el capítulo por él (antes lanzaba ValueError). No afirmar la "doble capa de defensa" antigua.
+
 ## Vocabularios de dirección (Espec 4.1)
 - Emoción (12): neutral, alegría, tristeza, enojo, miedo, sorpresa, desprecio, ternura, orgullo, vergüenza, desesperación, determinación
 - Volumen/Entrega (6): susurro, bajo, normal, firme, elevado, grito
-- Ritmo (5): lento, pausado, normal, rápido, entrecortado
-- Intensidad: 1–5
+- Ritmo (5): lento, pausado, normal, rápido, entrecortado — en BD se guardan como factor de velocidad (ver "Semántica pace / intensity")
+- Intensidad: float 0–1 (CSV 1–5 → (n-1)/4)
 
 ## Defaults de volumen por verbo (Espec 4.2)
 - susurró/murmuró/balbuceó/cuchicheó → susurro
@@ -96,22 +104,59 @@ BD (`/home/aegis2/aurea/aurea.db`): libros/capítulos/segmentos/personajes/voice
 - `direct_segment` es idempotente: re-ejecutar no duplica pausas ni corrompe datos.
 - `aplicar_direccion` es idempotente: correr dos veces deja los mismos valores.
 - pause_before_ms solo al inicio del capítulo (600ms); el resto va en pause_after_ms del segmento anterior.
-- Marcadores `[` nunca llegan al TTS: dos capas de defensa (limpieza en `segmentize()` + ValueError en `_concat()`).
+- Marcadores `[pausa=Xs]`/`[silencio=Xs]` se limpian en `segmentize()`; un `[` restante es contenido legítimo y `_concat` ya no aborta por él (A5, 2026-11-20).
 - Redondeo: truncamiento (`int()`) para coincidir con ejemplos del spec (877.5 → 877, no 878).
 - 4 personajes de EL QUINTO SOL (Moctezuma, Tlilpotonqui, Iztacxochitl, Xochitl) SIN voz asignada (esperando a Alberto).
 - Detector de personajes corregido (`casting/detector.py:analyze` divide por líneas en lugar de por párrafos): detecta los 7 personajes del capítulo 2 de EL QUINTO SOL (Citlali, Tochtli, Yaotl, Xochitl, Moctezuma, Tlilpotonqui, Iztacxochitl).
 
+## Reparación 2026-11-20/21 (auditoría `~/workspace/aurea/AUDITORIA-aurea-2026-11-20.md`)
+Autorizada por Alberto ("Claro", 2026-11-20). Todo verificado en la VM con BD y directorios temporales (nunca producción). Versión resultante: **0.5.0**.
+
+### Críticos (Fase 1)
+- **C1** `core/generator.py`: la primera generación ya produce el WAV final (`seg.wav_path`/`seg.status` se refrescan en memoria tras `update_segment`); el éxito solo se emite si el WAV final existe en disco; `latest.wav` se copia.
+- **C2+C3** `ui/clone_panel.py` + `voice/clone_store.py`: `assign_character(cid, engine, profile_id, voice)` — XTTS sin TypeError; Kokoro GUARDA la voz elegida en BD.
+- **C4** `core/database.py`: `PRAGMA foreign_keys=ON` en cada conexión + borrado manual en cascada en `delete_book`; borrar un libro deja 0 capítulos/segmentos/personajes. `Database.close()` + `transaction()` (un commit por libro, M25) + `book_by_path()` (M11, dedup de re-importación).
+- **C5** `ui/main_window.py`: Pausa/Stop REALES por flag (`request_pause`/`request_resume`/`request_cancel`, comprobados entre segmentos). Stop NUNCA llama `wait()` en el hilo de UI. Pausa real (no `QThread.quit()`).
+- **A8** `ui/main_window.py`: un solo guarda de trabajo en curso (`self.active_worker`); dirigir mientras se genera (y viceversa) se bloquea con mensaje.
+
+### Semántica (Fase 2)
+- **A1+A2+A3** `direction/rules.py` + `scripts/aplicar_direccion.py`: ver "Semántica pace / intensity" arriba. `PACE_SPEED` vive en `rules.py`. `apply_emotion_pace` acepta nombre o float.
+- **A4** `ingestion/md_reader.py`: H2/H3/`---` antes del primer H1 no revientan; el contenido pre-H1 se conserva como capítulo propio. Tablas `|...|` omitidas, `>` de cita quitado (M13/M14). `text_reader` con fallback latin-1 (M12).
+
+### Altos restantes (Fase 3)
+- **A5** `_concat` ya no aborta por `[`; **A6** XTTS sin muestra → fallback a narradora con aviso; **A7** WAVs en PCM_16 (`sf.write` con `subtype='PCM_16'`) para que `_wav_peaks` los lea; **A9** `process_master` integrado en `_concat` (ver arriba); **A10** casilla/botón "Refinar con Ollama" conectados a `use_llm`, `MODEL` por env `AUREA_OLLAMA_MODEL` (default `qwen3.5:4b`); **A11** los 5 `.sh` de setup usan `write_once` (sin `--force` no sobrescriben archivos existentes; con `--force`, backup con timestamp); **A12** controles de Dirección leídos y aplicados al segmento seleccionado, "Aplicar voces" navega a la página Voz, papelera del sidebar borra el libro con confirmación.
+- **M1/M2/M3** `direction/director.py`: is_first/prev_speaker/cola sobre el capítulo completo; idx del LLM validado (rango + emoción contra vocabulario de 12); `_chat` con timeout 120 s y cancelable; worker con flags cancel/pause y señales `log`/`cancelled`.
+- **M4/M5/M6** `main_window.py`: `_refresh_chapters` conserva selección; cambio de capítulo refresca segmentos; `_direct_chapter` crea segmentos si faltan. **M7** log visible (`log_view` QTextEdit en Estudio) + señales `log` separadas de `progress`. **M8** `finally` en el generador: libera XTTS y cierra la BD del hilo. **M19** `_play` respeta el deslizador de volumen. **M29/B4** sin `_refresh_cast` duplicada ni imports sin usar; `_pending_gen` y `_volume` inicializados en `__init__`. **B12** borrar perfil pide confirmación. **B1** versión única en `aurea/__init__.py`.
+- **Bugs hallados al verificar (no estaban en la auditoría):** `clone_store.clone_sample_map()` hacía `JOIN characters` sobre la BD junto al repo y reventaba con "no such table: characters" cuando esa BD no era la del proyecto — tumbaba TODA la generación. Corregido: `_db_path()` honra `AUREA_HOME` además de `AUREA_DB_PATH`, y `clone_sample_map()` devuelve `{}` si falta la tabla/columna. `database.aurea_home()` resuelve la raíz en cada llamada (el generador congelaba `AUREA_HOME` al importar y los tests escribían en `~/aurea`). `sample_prep._voices_dir()` honra `AUREA_VOICES_DIR`. El caso 3 de `verificar_pausas.py` esperaba 700 ms exactos para "..." pero el valor dirigido real es 777 ms (700 × 1/0.9, pace 0.9 por puntos suspensivos) — expectativa corregida, no el código.
+
+### Acabado cyberpunk premium (Fase 4, solo presentación)
+- `ui/theme.py`: QSS consolidado (sin duplicados M9), escala tipográfica + grid 8 px, fuentes reales verificadas con fc-list (DejaVu Sans Mono / Noto Sans Mono / Liberation Mono; Ubuntu Mono solo fallback), estados completos (QMenu, QMessageBox, popup QComboBox, botones QSpinBox, QSplitter, QTextEdit), barra de progreso legible, `HudPanel` con las 4 esquinas bracket (B9), sin emoji (glifos seguros ▶ ■ ● ◆ ▸ ✓ ✕ »), indicador de salud REAL (modelo Kokoro cargado o no).
+- `ui/main_window.py`: transporte con play/pausa ▶/II, atajos Ctrl+Espacio / Espacio / S, tooltips en español. **B5: MainWindow sigue siendo QFrame** (migrar a QMainWindow no se demostró seguro; documentado en el docstring de la clase).
+
+### Tests (Fase 5) — resultados 2026-11-21
+- `tests/test_aurea.py` (nueva suite pytest): **16/16** en 2 corridas consecutivas (C1, C2, C3, C4, C5 stop, C5 pausa/reanuda, A1, A2, A3, A4 ×2, M11, M25, clone_sample_map sin tabla characters, `_voices_dir`, `_wav_peaks` PCM_16). Correr con `QT_QPA_PLATFORM=offscreen pytest tests/test_aurea.py -v`.
+- `scripts/verificar_pausas.py`: **29/29** (M22: sin `or True`; caso 10 con intensidad 0–1; casos 11–12 con BD temporal propia; caso 3 corregido a 777 ms).
+- `scripts/verificar_wav_capitulo.py`: **11/11** (M23: BD temporal propia, TTS falso documentado, ruta por `gen._last_wav`, `process_master` verificado por RMS 0.224 → 0.127, PCM_16, `[risas]` sobrevive).
+- `scripts/verificar_direccion.py`: **todas pasan** (M22: escalas nuevas pace 0.75/1.2, intensidad 0.5/1.0/0.75; BD temporal; `NamedTemporaryFile`).
+- `scripts/verificar_md.py`: **todas pasan** (ruta repo + `NamedTemporaryFile`).
+- `scripts/smoke_fase4c.py`: **exit 0 con SKIP honesto** (M24: import KokoroAdapter corregido a `aurea.tts.kokoro_adapter`, API `synthesize`; perfil existente reutilizado; XTTS no disponible en la VM → clonación NO verificada aquí).
+- Smoke MainWindow offscreen (`/tmp/smoke_mainwindow.py`): **17/17** (ventana, active_worker, salud, log, Ollama, volumen, pausa/stop, papelera, aplicar dirección).
+- Smoke Fase 4 (`/tmp/smoke_fase4.py`): **37/37** (tema, glifos, esquinas HudPanel por píxeles, atajos, play ▶/II).
+- **VM sin libEGL:** QtWidgets no importaba; se resolvió extrayendo el `.deb` oficial `libegl1` a `/tmp/egl-shim` y corriendo con `LD_LIBRARY_PATH=/tmp/egl-shim/usr/lib/x86_64-linux-gnu` (un `apt-get install` quedó bloqueado por otro proceso con el lock). Los smokes de /tmp son efímeros; la suite pytest es lo permanente.
+
 ## Resultado validado
-- `scripts/verificar_pausas.py`: TODAS LAS PRUEBAS PASAN (20 casos: puntuación, cambio de hablante, marcadores al final/en medio/fuera de rango, modificadores ritmo/emoción, pregunta +200ms, intensidad +300ms, idempotencia, no-NULL).
-- `scripts/verificar_md.py`: TODAS LAS PRUEBAS PASAN (encabezados, limpieza de formato, listas, marcadores en .md, encabezado no contamina casting, sin marcas MD en segmentos, título H1 con pausa 800ms).
-- `scripts/verificar_direccion.py`: TODAS LAS PRUEBAS PASAN (aplicar CSV a 3 segmentos, personaje no coincidente se rechaza, idempotencia, defaults por verbo susurró→susurro/gritó→grito/ordenó→firme).
+Ver la sección "Reparación 2026-11-20/21" arriba (conteos exactos 2026-11-21). Resumen histórico previo (2026-11-12, escalas antiguas — no usar como referencia de valores):
+- `scripts/verificar_pausas.py`: 20 casos en su momento; hoy 29/29 con escalas nuevas.
+- `scripts/verificar_md.py`: encabezados, limpieza de formato, listas, marcadores en .md, encabezado no contamina casting, sin marcas MD en segmentos, título H1 con pausa 800ms.
+- `scripts/verificar_direccion.py`: aplicar CSV a 3 segmentos, personaje no coincidente se rechaza, idempotencia, defaults por verbo susurró→susurro/gritó→grito/ordenó→firme.
 - Detector de personajes probado con capítulo 2 de EL QUINTO SOL: detecta los 7 personajes (Citlali, Tochtli, Yaotl, Xochitl, Moctezuma, Tlilpotonqui, Iztacxochitl) en 23 segmentos (21 de diálogo + 2 de narración con marcadores de pausa).
-- `scripts/verificar_wav_capitulo.py`: verifica duración WAV = suma segmentos + suma pausas, sin clipping, sin corchetes en texto. Probado con libro 20 capítulo 0 (92 segmentos, 26 con audio generado): _concat funciona correctamente, sin clipping (peak 0.3872), sin corchetes, todos con pause_after_ms.
-- `scripts/smoke_fase4c.py`: OK: 11.3s de audio en 56.4s → RTF 4.98 | RAM pico 4432 MB.
+- `scripts/verificar_wav_capitulo.py`: hoy 11/11 con BD temporal y TTS falso (antes: libro 20 capítulo 0 real, 92 segmentos).
+- `scripts/smoke_fase4c.py`: en su momento OK con XTTS real: 11.3s de audio en 56.4s → RTF 4.98 | RAM pico 4432 MB. Hoy en la VM: SKIP honesto (sin coqui-tts).
 
 ## Problemas conocidos (audio / TTS)
 - Pronunciación en español con Kokoro fp16: "baja" suena como "paja", nombres propios enredados. Limitaciones del G2P (Misaki/espeak-ng), no del código.
-- 4 segmentos existentes en BD tenían `[pausa=Xs]` sin limpiar. Ya limpiados (0 restantes). `_concat` lanza ValueError si intenta sintetizarlos (segunda capa de defensa). Los nuevos segmentos desde `segmentize()` tienen texto limpio.
+- `process_segment` existe pero no está conectado (ver A9 arriba): los segmentos no se procesan individualmente, solo el master final.
+- 4 segmentos existentes en BD tenían `[pausa=Xs]` sin limpiar. Ya limpiados (0 restantes). **Desde 2026-11-20, `_concat` ya NO lanza ValueError por corchetes** (A5): un `[` restante es contenido legítimo.
 
 ## Siguiente paso concreto
 1. ✅ Limpieza de 4 segmentos con corchetes y re-dirección capítulo 22 (libro 20) - HECHO

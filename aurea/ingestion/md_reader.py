@@ -7,7 +7,7 @@ convierte en estructura (capítulos, pausas).
 import re
 from pathlib import Path
 
-from .base import BookReader
+from .base import BookReader, read_text_smart
 
 # Encabezados
 H1 = re.compile(r"^#{1}\s+(.+)$")
@@ -16,6 +16,9 @@ H3PLUS = re.compile(r"^#{3,}\s+(.+)$")
 
 # Reglas horizontales
 HR = re.compile(r"^(\*\*\*|---|___)\s*$")
+
+# Fila de tabla Markdown | a | b | (se omite: el TTS no debe leer pipes)
+TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
 
 # Bloques de código cercados
 FENCE_START = re.compile(r"^```")
@@ -48,7 +51,7 @@ class MarkdownReader(BookReader):
     """Lee un .md y devuelve [(titulo_capitulo, texto), ...]."""
 
     def read(self, path: str):
-        raw = Path(path).read_text(encoding="utf-8", errors="replace")
+        raw = read_text_smart(path)
         lines = raw.splitlines()
 
         # ---- Pre-procesamiento: marcar ítems de lista que son el último
@@ -90,6 +93,10 @@ class MarkdownReader(BookReader):
             if m:
                 if current_title is not None:
                     chapters.append((current_title, "\n".join(current_parts).strip()))
+                elif current_parts:
+                    # A4: contenido previo al primer H1 (tras H2/H3/---):
+                    # capítulo sin título (nombre del archivo), no se tira.
+                    chapters.append((Path(path).stem, "\n".join(current_parts).strip()))
                 current_title = m.group(1).strip()
                 current_parts = []
                 # Anuncio del título: segmento de narración con voz narradora
@@ -101,9 +108,13 @@ class MarkdownReader(BookReader):
                 continue
 
             # H2 → corte de sección (800 ms en segmento anterior)
+            # A4: antes del primer H1, current_title es None y el
+            # startswith reventaba con TypeError. Sin título aún, la
+            # marca de sección se ignora y el texto sigue como contenido.
             m = H2.match(line)
             if m:
-                if current_parts and not current_parts[-1].startswith(current_title):
+                if current_title is not None and current_parts \
+                        and not current_parts[-1].startswith(current_title):
                     current_parts[-1] = current_parts[-1] + "[pausa=0.8s]"
                 i += 1
                 continue
@@ -111,15 +122,22 @@ class MarkdownReader(BookReader):
             # H3 o más → subsección (500 ms en segmento anterior)
             m = H3PLUS.match(line)
             if m:
-                if current_parts and not current_parts[-1].startswith(current_title):
+                if current_title is not None and current_parts \
+                        and not current_parts[-1].startswith(current_title):
                     current_parts[-1] = current_parts[-1] + "[pausa=0.5s]"
                 i += 1
                 continue
 
             # Regla horizontal → corte de sección (800 ms)
             if HR.match(line):
-                if current_parts and not current_parts[-1].startswith(current_title):
+                if current_title is not None and current_parts \
+                        and not current_parts[-1].startswith(current_title):
                     current_parts[-1] = current_parts[-1] + "[pausa=0.8s]"
+                i += 1
+                continue
+
+            # Fila de tabla Markdown → se omite entera (M13)
+            if TABLE_ROW.match(line):
                 i += 1
                 continue
 
@@ -150,6 +168,8 @@ class MarkdownReader(BookReader):
         """Elimina formato Markdown de una línea individual, manteniendo el texto."""
         t = line
 
+        # Cita `> ...`: quitar el marcador (M14)
+        t = re.sub(r"^\s*(>\s*)+", "", t)
         # Eliminar imágenes completamente
         t = IMAGE_RE.sub("", t)
         # Enlaces: conservar texto, quitar URL

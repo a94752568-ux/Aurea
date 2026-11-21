@@ -16,17 +16,40 @@ Casos de prueba (todos deben pasar):
 12. Ningún segmento contiene #, *, [, ], backticks de Markdown
 13. Título H1 se anuncia como segmento de narración con pause_after_ms=800
 """
-import sys
 import os
+import sys
 import tempfile
 
-sys.path.insert(0, "/home/aegis2/aurea")
+# Raiz del repo (este script vive en scripts/): nunca la ruta de produccion.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from aurea.ingestion.md_reader import MarkdownReader
-from aurea.core.generator import segmentize
-from aurea.direction.rules import parse_markers
+# Stubs de Kokoro/XTTS: la VM no tiene kokoro_onnx/misaki instalados.
+import types as _types
+_kokoro = _types.ModuleType("kokoro_onnx")
+_kokoro.Kokoro = object
+sys.modules.setdefault("kokoro_onnx", _kokoro)
+_misaki = _types.ModuleType("misaki")
+_espeak = _types.ModuleType("misaki.espeak")
+_espeak.EspeakG2P = object
+_espeak.EspeakFallback = object
+_misaki.espeak = _espeak
+sys.modules.setdefault("misaki", _misaki)
+sys.modules.setdefault("misaki.espeak", _espeak)
+
+from aurea.core.generator import segmentize  # noqa: E402
+from aurea.direction.rules import parse_markers  # noqa: E402
+from aurea.ingestion.md_reader import MarkdownReader  # noqa: E402
 
 FAILURES = []
+
+
+def write_md(text):
+    """Archivo .md temporal con NamedTemporaryFile."""
+    f = tempfile.NamedTemporaryFile("w", suffix=".md", delete=False,
+                                   encoding="utf-8")
+    f.write(text)
+    f.close()
+    return f.name
 
 
 def check(name, condition, detail=""):
@@ -65,9 +88,7 @@ Texto después de la regla horizontal.
 
 Texto del segundo capítulo.
 """
-tmp = tempfile.mktemp(suffix=".md")
-with open(tmp, "w", encoding="utf-8") as f:
-    f.write(md)
+tmp = write_md(md)
 chapters = MarkdownReader().read(tmp)
 
 check("Al menos 2 capítulos (H1)", len(chapters) >= 2, f"obtuvo {len(chapters)}")
@@ -115,9 +136,7 @@ Nota al pie[^1].
 
 <div>HTML</div>
 """
-tmp2 = tempfile.mktemp(suffix=".md")
-with open(tmp2, "w", encoding="utf-8") as f:
-    f.write(md2)
+tmp2 = write_md(md2)
 chapters2 = MarkdownReader().read(tmp2)
 text2 = chapters2[0][1]
 parts2 = get_segments(text2, use_cast=False)
@@ -156,9 +175,7 @@ print("== Listas ==")
 md_list = """- ítem 1
 - ítem 2
 - ítem 3"""
-tmp_list = tempfile.mktemp(suffix=".md")
-with open(tmp_list, "w", encoding="utf-8") as f:
-    f.write(md_list)
+tmp_list = write_md(md_list)
 chapters_list = MarkdownReader().read(tmp_list)
 parts_list = get_segments(chapters_list[0][1], use_cast=False)
 check("Lista de 3 ítems → 3 segmentos", len(parts_list) == 3, f"obtuvo {len(parts_list)}")
@@ -180,9 +197,7 @@ except:
 # ---- Caso 10: [pausa=0.8s] en .md ----
 print("== Marcador en .md ==")
 md3 = "# Test\n\nTexto [pausa=0.8s] medio."
-tmp3 = tempfile.mktemp(suffix=".md")
-with open(tmp3, "w", encoding="utf-8") as f:
-    f.write(md3)
+tmp3 = write_md(md3)
 chapters3 = MarkdownReader().read(tmp3)
 text3 = chapters3[0][1]
 parts3 = get_segments(text3, use_cast=False)
@@ -199,9 +214,7 @@ check("Segmento de texto existe", texto_seg is not None)
 # ---- Caso 11: Encabezado con "dijo X" no crea personaje fantasma ----
 print("== Encabezado no contamina casting ==")
 md4 = "# Juan dijo algo\n\nTexto normal."
-tmp4 = tempfile.mktemp(suffix=".md")
-with open(tmp4, "w", encoding="utf-8") as f:
-    f.write(md4)
+tmp4 = write_md(md4)
 chapters4 = MarkdownReader().read(tmp4)
 text4 = chapters4[0][1]
 parts4 = get_segments(text4, use_cast=False)

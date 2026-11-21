@@ -18,7 +18,7 @@ def import_book(path: str):
     p = Path(path)
     ext = p.suffix.lower()
     if ext not in READERS:
-        raise ValueError(f"Formato no soportado: {ext} (usa TXT, EPUB o PDF)")
+        raise ValueError(f"Formato no soportado: {ext} (usa TXT, MD, EPUB o PDF)")
     chapters = READERS[ext]().read(str(p))
     if not chapters:
         raise ValueError("No se encontró texto importable en el archivo.")

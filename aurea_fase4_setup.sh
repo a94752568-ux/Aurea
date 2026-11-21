@@ -1,4 +1,26 @@
 #!/usr/bin/env bash
+# --- A11: escritura segura (no revierte codigo existente) ---
+# Sin --force, un archivo destino que ya existe NO se sobrescribe: se
+# avisa y se conserva. Con --force se hace backup con timestamp y se
+# reescribe. Una instalacion limpia escribe todo con normalidad.
+AUREA_FORCE=0
+if [ "${1:-}" = "--force" ]; then AUREA_FORCE=1; fi
+write_once() {
+  local dest="$1"
+  if [ -e "$dest" ] && [ "$AUREA_FORCE" != "1" ]; then
+    echo "AVISO: $dest ya existe; no se sobrescribe (usa --force para reescribir con backup)" >&2
+    cat > /dev/null
+    return 0
+  fi
+  if [ -e "$dest" ]; then
+    local bak="$dest.bak.$(date +%Y%m%d-%H%M%S)"
+    cp "$dest" "$bak"
+    echo "Backup: $dest -> $bak" >&2
+  fi
+  mkdir -p "$(dirname "$dest")"
+  cat > "$dest"
+}
+# --- fin A11 ---
 # =============================================================
 #  AUREA Audiobook Studio · Fase 4b — Director Híbrido
 #  Protocolo Nova-Aegis
@@ -31,7 +53,7 @@ cp -r "$AUREA/aurea" "$BACKUP"
 say "Código anterior respaldado en $BACKUP"
 
 # ---------------- direction/rules.py (capa de reglas) ----------------
-cat > "$AUREA/aurea/direction/rules.py" <<'EOF'
+write_once "$AUREA/aurea/direction/rules.py" <<'EOF'
 """Capa de reglas del Director Híbrido: dirección instantánea y
 determinista para los casos claros. El LLM (opcional) solo refina
 la narración ambigua. Cero espera, cero errores en lo literal."""
@@ -97,7 +119,7 @@ def needs_llm(seg):
 EOF
 
 # ---------------- direction/director.py (híbrido) ----------------
-cat > "$AUREA/aurea/direction/director.py" <<'EOF'
+write_once "$AUREA/aurea/direction/director.py" <<'EOF'
 """Director Híbrido: reglas instantáneas + refinamiento opcional con Ollama."""
 import json
 import re
@@ -268,7 +290,7 @@ class DirectionWorker(QThread):
 EOF
 
 # ---------------- ui/main_window.py (casilla de refinamiento) ----------------
-cat > "$AUREA/aurea/ui/main_window.py" <<'EOF'
+write_once "$AUREA/aurea/ui/main_window.py" <<'EOF'
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl

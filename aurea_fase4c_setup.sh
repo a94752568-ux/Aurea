@@ -1,4 +1,26 @@
 #!/usr/bin/env bash
+# --- A11: escritura segura (no revierte codigo existente) ---
+# Sin --force, un archivo destino que ya existe NO se sobrescribe: se
+# avisa y se conserva. Con --force se hace backup con timestamp y se
+# reescribe. Una instalacion limpia escribe todo con normalidad.
+AUREA_FORCE=0
+if [ "${1:-}" = "--force" ]; then AUREA_FORCE=1; fi
+write_once() {
+  local dest="$1"
+  if [ -e "$dest" ] && [ "$AUREA_FORCE" != "1" ]; then
+    echo "AVISO: $dest ya existe; no se sobrescribe (usa --force para reescribir con backup)" >&2
+    cat > /dev/null
+    return 0
+  fi
+  if [ -e "$dest" ]; then
+    local bak="$dest.bak.$(date +%Y%m%d-%H%M%S)"
+    cp "$dest" "$bak"
+    echo "Backup: $dest -> $bak" >&2
+  fi
+  mkdir -p "$(dirname "$dest")"
+  cat > "$dest"
+}
+# --- fin A11 ---
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -11,11 +33,11 @@ cp -r aurea "$BACKUP/" 2>/dev/null || true
 mkdir -p aurea/voice voices
 
 # ---------- aurea/voice/__init__.py ----------
-cat > aurea/voice/__init__.py <<'EOF'
+write_once aurea/voice/__init__.py <<'EOF'
 EOF
 
 # ---------- aurea/voice/clone_store.py ----------
-cat > aurea/voice/clone_store.py <<'EOF'
+write_once aurea/voice/clone_store.py <<'EOF'
 """Perfiles de voz clonada: esquema, alta y consulta. SQLite en aurea.db."""
 import os, sqlite3, time
 
@@ -96,7 +118,7 @@ def assign_character(character_id, engine, profile_id=None):
 EOF
 
 # ---------- aurea/voice/sample_prep.py ----------
-cat > aurea/voice/sample_prep.py <<'EOF'
+write_once aurea/voice/sample_prep.py <<'EOF'
 """Importación y análisis de muestras: mp3/wav/flac/m4a/ogg → WAV 22050 Hz mono limpio."""
 import os, subprocess, tempfile
 import numpy as np
@@ -168,7 +190,7 @@ def import_sample(src_path, profile_name):
 EOF
 
 # ---------- aurea/voice/xtts_adapter.py ----------
-cat > aurea/voice/xtts_adapter.py <<'EOF'
+write_once aurea/voice/xtts_adapter.py <<'EOF'
 """Adaptador XTTS-v2 (clonación, CPU). Mismo contrato que KokoroAdapter:
 cargar (lazy), generar, cancelar, liberar."""
 import os, threading, time
@@ -231,7 +253,7 @@ EOF
 
 # ---------- scripts/smoke_fase4c.py ----------
 mkdir -p scripts
-cat > scripts/smoke_fase4c.py <<'EOF'
+write_once scripts/smoke_fase4c.py <<'EOF'
 """Prueba de humo Fase 4c: crea un perfil desde un WAV sintético de Kokoro,
 genera una frase clonada y mide RTF/RAM."""
 import os, sys, time, resource

@@ -1,7 +1,7 @@
 import re
 from pathlib import Path
 
-from .base import BookReader
+from .base import BookReader, read_text_smart
 
 HEADING = re.compile(
     r"^\s*(cap[íi]tulo|CAP[ÍI]TULO|parte|PARTE|prólogo|PRÓLOGO|epílogo|EPÍLOGO)\b.{0,60}$")
@@ -9,7 +9,7 @@ HEADING = re.compile(
 
 class TextReader(BookReader):
     def read(self, path):
-        raw = Path(path).read_text(encoding="utf-8", errors="replace")
+        raw = read_text_smart(path)
         lines = raw.splitlines()
         heads = [i for i, l in enumerate(lines)
                  if len(l.strip()) < 80 and HEADING.match(l)]

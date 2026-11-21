@@ -9,6 +9,12 @@ segmento; si no coincide, NO aplica esa fila y la reporta como error.
 
 La aplicación es idempotente: correrla dos veces deja los mismos valores,
 no duplica nada.
+
+Escalas (decididas 2026-11-20, A1–A3): el CSV trae ritmo como nombre y
+intensidad 1–5; se guardan normalizados: ritmo → factor de velocidad
+PACE_SPEED (lento=0.75, normal=1.0, rápido=1.2) e intensidad → float 0–1
+con (n-1)/4. El generador usa `pace` como velocidad: un "lento" del CSV
+ya no se sintetiza 1.5× más rápido.
 """
 import csv
 import sys
@@ -19,7 +25,7 @@ from aurea.core.database import Database
 from aurea.casting.cast_manager import CastManager
 from aurea.direction.rules import (
     pause_for_punctuation, apply_emotion_pace,
-    clamp_pause_after, clamp_pause_before, PACE_MULT
+    clamp_pause_after, clamp_pause_before, PACE_SPEED
 )
 
 DB_PATH = None  # se usa la ruta por defecto de Database()
@@ -112,15 +118,17 @@ def apply_direction(book_id, csv_path, chapter_idx=0):
             )
             continue
 
-        # Aplicar dirección
-        pace = PACE_MULT.get(ritmo, 1.0) if ritmo else 1.0
+        # Aplicar dirección (escalas normalizadas, A1–A3):
+        # ritmo nombre → factor de VELOCIDAD; intensidad 1–5 → 0–1.
+        pace = PACE_SPEED.get(ritmo, 1.0) if ritmo else 1.0
         emotion = emocion if emocion else "neutral"
         delivery = volumen if volumen else "normal"
 
         try:
-            intensity = int(intensidad) if intensidad else 1
+            intensity_raw = int(intensidad) if intensidad else 1
         except ValueError:
-            intensity = 1
+            intensity_raw = 1
+        intensity = (min(max(intensity_raw, 1), 5) - 1) / 4.0
 
         # Pausa antes
         if seg.pause_before_ms is not None and seg.pause_before_ms > 0:
@@ -142,8 +150,10 @@ def apply_direction(book_id, csv_path, chapter_idx=0):
             if seg.kind == "dialogue" and seg.text.rstrip().endswith("?"):
                 pause_after += 200
 
-            # Intensidad 5: +300 ms después (golpe dramático)
-            if intensity == 5:
+            # Intensidad alta (>= 0.8 en escala 0–1): +300 ms después
+            # (golpe dramático). Antes era `== 5` (escala CSV), que tras
+            # la normalización nunca se cumplía (A2).
+            if intensity >= 0.8:
                 pause_after += 300
 
             pause_after = clamp_pause_after(pause_after)

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
+    QAbstractButton,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -19,6 +21,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSlider,
     QStackedWidget,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
     QMessageBox,
@@ -26,13 +29,18 @@ from PySide6.QtWidgets import (
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtCore import QTimer
 
+from aurea import __version__
+
 from ..ui.theme import (
     COLORS,
+    SPACING_MD,
+    SPACING_SM,
     HudPanel,
     Sidebar,
     WaveformView,
     apply_theme,
     apply_dark_palette,
+    status_text_style,
     toast,
 )
 
@@ -40,33 +48,51 @@ from ..casting.cast_manager import CastManager
 from ..casting.detector import detect_characters
 from ..core.database import Database
 from ..core.generator import ChapterGenerator, segmentize
-from ..direction.director import MODEL, DirectionWorker
+from ..direction.director import DirectionWorker
+from ..direction.rules import EMOTIONS
 from ..ingestion.importer import import_book
-from ..tts.kokoro_adapter import VOICES_ES
 from ..voice import clone_store
 from .clone_panel import ClonePanel
 
+# Glifos de la barra lateral: solo caracteres presentes en DejaVu Sans Mono
+# (verificado con fontTools en la VM). NADA de emoji: en Lubuntu sin fuentes
+# emoji se ven como tofu. ◆ biblioteca · ▶ estudio · ● reparto · ▸ dirección
+# · ✓ voz clonada. El tooltip de cada botón dice qué sección es.
 SECTIONS = [
-    ("biblioteca", "📚", "Biblioteca"),
-    ("estudio", "🎚️", "Estudio"),
-    ("reparto", "🎭", "Reparto"),
-    ("direccion", "🎬", "Dirección"),
-    ("voz", "🧬", "Voz clonada"),
+    ("biblioteca", "◆", "Biblioteca"),
+    ("estudio", "▶", "Estudio"),
+    ("reparto", "●", "Reparto"),
+    ("direccion", "▸", "Dirección"),
+    ("voz", "✓", "Voz clonada"),
 ]
 
 
 class MainWindow(QFrame):
+    """Ventana principal de AUREA.
+
+    B5 (decisión documentada 2026-11-20): se mantiene QFrame y NO se migra
+    a QMainWindow en este pase. Un QMainWindow real cambiaría el layout raíz
+    (central widget, barra de menú, barra de estado) y no hay una prueba que
+    demuestre que nada se rompa; el cambio queda pendiente con prueba propia.
+    Los atajos de transporte se implementan con QShortcut + keyPressEvent,
+    que no necesitan QMainWindow.
+    """
     def __init__(self):
         super().__init__()
         apply_theme(self)
         apply_dark_palette(QApplication.instance())
-        self.setWindowTitle("AUREA Audiobook Studio — 0.5 (Neon HUD)")
+        # B1: una sola constante de versión (aurea/__init__.py).
+        self.setWindowTitle(f"AUREA Audiobook Studio — {__version__} (Neon HUD)")
         self.resize(1180, 720)
 
         self.db = Database()
-        self.worker = None
-        self.director = None
+        # A8: UN SOLO guarda de "trabajo en curso" compartido por Estudio
+        # y Dirección. Antes había dos (self.worker y self.director) y cada
+        # uno solo miraba el suyo: dirigir mientras se generaba corría a
+        # la vez sobre el mismo capítulo y la misma BD.
+        self.active_worker = None
         self.player = None
+        self._player_state_wired = False  # stateChanged del transporte
         self._books = []
         self._chapters = []
         self._cast = []
@@ -74,8 +100,10 @@ class MainWindow(QFrame):
         self._current_book_id = None
         self._current_chapter_id = None
         self._last_wav = None
-        self.player = None
         self.audio_out = None
+        self._pending_gen = None  # (chapter, force) de la cadena dirigir→generar
+        self._use_llm = False     # A10: refinamiento Ollama (casilla Dirección)
+        self._volume = 0.8        # M19: volumen real del deslizador
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -88,8 +116,9 @@ class MainWindow(QFrame):
         mid.setSpacing(0)
 
         self.sidebar = Sidebar([(k, i, t) for k, i, t in SECTIONS])
-        self.sidebar.add_footer("borrar", "🗑️", "Borrar libro seleccionado")
+        self.sidebar.add_footer("borrar", "✕", "Borrar libro seleccionado")
         self.sidebar.changed.connect(self._on_section)
+        self.sidebar.footer_action.connect(self._on_sidebar_footer)
         mid.addWidget(self.sidebar)
 
         self.stack = QStackedWidget()
@@ -104,7 +133,9 @@ class MainWindow(QFrame):
         root.addWidget(self._build_transport())
 
         self.sidebar.set_active("estudio")
+        self._setup_transport_shortcuts()
         self.refresh_books()
+        self._refresh_health()
 
     # ================================================================
     # HEADER
@@ -118,11 +149,10 @@ class MainWindow(QFrame):
         logo = QLabel("AUR")
         logo.setProperty("hud", "title")
         e = QLabel("E")
-        e.setProperty("hud", "title")
-        e.setStyleSheet(f"color:{COLORS['magenta']};")
+        e.setProperty("hud", "title-accent")  # magenta; estilo en theme.py QSS
         a = QLabel("A")
         a.setProperty("hud", "title")
-        sub = QLabel("AUDIOBOOK // STUDIO v0.5")
+        sub = QLabel(f"AUDIOBOOK // STUDIO v{__version__}")
         sub.setProperty("hud", "true")
         for wdg in (logo, e, a, sub):
             lay.addWidget(wdg)
@@ -133,10 +163,18 @@ class MainWindow(QFrame):
         lay.addWidget(self.book_chip)
 
         lay.addStretch(1)
-        self.status_lbl = QLabel("● KOKORO FP16 · LISTO")
-        self.status_lbl.setStyleSheet(
-            f"color:{COLORS['green']};font-family:monospace;font-size:11px;"
-        )
+        # Indicador de salud REAL (antes: texto fijo "KOKORO FP16 · LISTO").
+        # Se actualiza en _refresh_health(): LISTO solo si el modelo está
+        # cargado; si no, dice si los archivos de modelo existen o no.
+        # EXCEPCIÓN DOCUMENTADA (Fase 4): health_lbl y status_lbl llevan
+        # setStyleSheet en línea porque su COLOR cambia con el estado
+        # (verde/ámbar/magenta/cian). La fuente y el tamaño no se repiten
+        # aquí: viven en theme.status_text_style(), una sola función.
+        self.health_lbl = QLabel("● KOKORO · …")
+        self.health_lbl.setStyleSheet(status_text_style(COLORS['dim']))
+        lay.addWidget(self.health_lbl)
+        self.status_lbl = QLabel("● LISTO")
+        self.status_lbl.setStyleSheet(status_text_style(COLORS['green']))
         lay.addWidget(self.status_lbl)
 
         self.progress_bar = QProgressBar()
@@ -159,10 +197,12 @@ class MainWindow(QFrame):
         return lbl
 
     @staticmethod
-    def _btn(text: str, variant: str | None = None) -> QPushButton:
+    def _btn(text: str, variant: str | None = None, tip: str | None = None) -> QPushButton:
         b = QPushButton(text)
         if variant:
             b.setProperty("variant", variant)
+        if tip:
+            b.setToolTip(tip)
         return b
 
     def _update_progress(self, value: int, message: str, color: str | None = None):
@@ -172,12 +212,28 @@ class MainWindow(QFrame):
         if message:
             self.status_lbl.setText(message)
         if color:
-            self.status_lbl.setStyleSheet(
-                f"color:{color};font-family:monospace;font-size:11px;"
-            )
+            self.status_lbl.setStyleSheet(status_text_style(color))
         if value >= 100:
             self.progress_bar.hide()
             self.progress_bar.setValue(0)
+
+    def _refresh_health(self):
+        """Indicador de salud REAL del motor Kokoro (sin cargar el modelo:
+        solo mira si ya está cargado en memoria y si existen los archivos)."""
+        try:
+            from ..tts.kokoro_adapter import MODELS_DIR, KokoroAdapter
+            adapter = KokoroAdapter()
+            if adapter.loaded:
+                text, color = "● KOKORO · LISTO", COLORS['green']
+            elif (MODELS_DIR / "kokoro-v1.0.fp16.onnx").exists() and \
+                    (MODELS_DIR / "voices-v1.0.bin").exists():
+                text, color = "● KOKORO · MODELOS OK", COLORS['amber']
+            else:
+                text, color = "● KOKORO · SIN MODELOS", COLORS['magenta']
+        except Exception:
+            text, color = "● KOKORO · ?", COLORS['dim']
+        self.health_lbl.setText(text)
+        self.health_lbl.setStyleSheet(status_text_style(color))
 
     # ================================================================
     # PÁGINA 0 · BIBLIOTECA
@@ -185,12 +241,12 @@ class MainWindow(QFrame):
     def _page_biblioteca(self) -> QWidget:
         page = QWidget()
         lay = QHBoxLayout(page)
-        lay.setContentsMargins(12, 12, 12, 12)
-        lay.setSpacing(12)
+        lay.setContentsMargins(SPACING_MD, SPACING_MD, SPACING_MD, SPACING_MD)
+        lay.setSpacing(SPACING_SM)
 
         panel = HudPanel("BIBLIOTECA", "TXT · EPUB · PDF · MD")
         row = QHBoxLayout()
-        btn_import = self._btn("+ Importar libro", "primary")
+        btn_import = self._btn("+ Importar libro", "primary", "Importar un libro (TXT, EPUB, PDF o MD)")
         btn_import.clicked.connect(self._import_book)
         row.addWidget(btn_import)
         row.addStretch(1)
@@ -200,7 +256,7 @@ class MainWindow(QFrame):
         self.book_list.currentRowChanged.connect(self._on_book_selected)
         panel.body.addWidget(self.book_list, 1)
 
-        btn_del = self._btn("🗑 Borrar libro seleccionado", "danger")
+        btn_del = self._btn("✕ Borrar libro seleccionado", "danger", "Borrar el libro seleccionado (pide confirmación)")
         btn_del.clicked.connect(self._delete_book)
         panel.body.addWidget(btn_del)
 
@@ -218,11 +274,23 @@ class MainWindow(QFrame):
         except Exception as e:  # noqa: BLE001
             QMessageBox.warning(self, "Importación", f"No se pudo importar:\n{e}")
             return
+        # M11: re-importar el mismo archivo no duplica el libro.
+        existing = self.db.book_by_path(path)
+        if existing:
+            toast(self, f"«{existing.title}» ya estaba importado; lo abro.", kind="info")
+            self.refresh_books()
+            for i, b in enumerate(self._books):
+                if b.id == existing.id:
+                    self.book_list.setCurrentRow(i)
+                    break
+            return
         book_id = self.db.add_book(title, path, Path(path).suffix.lower().lstrip("."))
-        for i, (ctitle, text) in enumerate(chapters):
-            self.db.add_chapter(book_id, i, ctitle, text)
-        self.log_line(f"📚 Importado «{title}»: {len(chapters)} capítulos")
-        toast(self, f"📚 Libro importado: «{title}»", kind="ok")
+        # M25: un solo commit por libro, no uno por capítulo/segmento.
+        with self.db.transaction():
+            for i, (ctitle, text) in enumerate(chapters):
+                self.db.add_chapter(book_id, i, ctitle, text)
+        self.log_line(f"» Importado «{title}»: {len(chapters)} capítulos")
+        toast(self, f"» Libro importado: «{title}»", kind="ok")
         self.refresh_books()
         self.book_list.setCurrentRow(self.book_list.count() - 1)
 
@@ -240,8 +308,8 @@ class MainWindow(QFrame):
         if reply != QMessageBox.Yes:
             return
         self.db.delete_book(book_id)
-        self.log_line(f"🗑 Libro borrado: «{title}»")
-        toast(self, f"🗑 Libro borrado: «{title}»", kind="warn")
+        self.log_line(f"✕ Libro borrado: «{title}»")
+        toast(self, f"✕ Libro borrado: «{title}»", kind="warn")
         self.refresh_books()
         self._on_book_selected(-1)
 
@@ -269,6 +337,9 @@ class MainWindow(QFrame):
         self._refresh_clone_panel()
 
     def _refresh_chapters(self):
+        # M4: conservar la selección; solo ir a la fila 0 si no había
+        # capítulo seleccionado (antes se perdía tras generar/dirigir).
+        prev_id = self._current_chapter_id
         self.chapter_list.clear()
         self._chapters = []
         if not self._current_book_id:
@@ -278,31 +349,22 @@ class MainWindow(QFrame):
             item = QListWidgetItem(f"{c.idx + 1:02d}. {c.title}")
             item.setData(Qt.UserRole, c.id)
             self.chapter_list.addItem(item)
-        # Seleccionar automáticamente el primer capítulo
         if self._chapters:
-            self.chapter_list.setCurrentRow(0)
-            self._current_chapter_id = self._chapters[0].id
+            target = 0
+            if prev_id is not None:
+                for i, c in enumerate(self._chapters):
+                    if c.id == prev_id:
+                        target = i
+                        break
+            self.chapter_list.setCurrentRow(target)
+            self._current_chapter_id = self._chapters[target].id
 
     def _on_chapter_selected(self, item):
         if item:
             self._current_chapter_id = item.data(Qt.UserRole)
-
-    def _refresh_cast(self):
-        self.cast_list.clear()
-        self._cast = []
-        if not self._current_book_id:
-            return
-        for ch in self.db.characters(self._current_book_id):
-            tag = " 🎙️ narrador" if ch.is_narrator else ""
-            voice_label = ch.voice
-            if ch.engine == "xtts" and ch.voice_profile_id:
-                prof = clone_store.get_profile(ch.voice_profile_id)
-                if prof:
-                    voice_label = f"clon: {prof['name']}"
-            item = QListWidgetItem(f"{ch.name} — {voice_label} (vel {ch.speed:.2f}){tag}")
-            item.setData(Qt.UserRole, ch.id)
-            self.cast_list.addItem(item)
-            self._cast.append(ch)
+            # M5: al cambiar de capítulo, refrescar sus segmentos (antes
+            # la lista seguía mostrando los del capítulo anterior).
+            self._refresh_segments_for_current()
 
     # ================================================================
     # PÁGINA 1 · ESTUDIO
@@ -310,8 +372,8 @@ class MainWindow(QFrame):
     def _page_estudio(self) -> QWidget:
         page = QWidget()
         lay = QHBoxLayout(page)
-        lay.setContentsMargins(12, 12, 12, 12)
-        lay.setSpacing(12)
+        lay.setContentsMargins(SPACING_MD, SPACING_MD, SPACING_MD, SPACING_MD)
+        lay.setSpacing(SPACING_SM)
 
         caps = HudPanel("CAPÍTULOS", "DOBLE CLIC = GENERAR")
         self.chapter_list = QListWidget()
@@ -320,19 +382,19 @@ class MainWindow(QFrame):
         caps.body.addWidget(self.chapter_list, 1)
 
         btns = QHBoxLayout()
-        btn_gen = self._btn("▶ Generar", "primary")
+        btn_gen = self._btn("▶ Generar", "primary", "Generar el audio del capítulo seleccionado")
         btn_gen.clicked.connect(self._on_chapter_generate)
         btns.addWidget(btn_gen, 1)
-        btn_dir = self._btn("🎬 Dirigir", "primary")
+        btn_dir = self._btn("▸ Dirigir", "primary", "Dirigir el capítulo con reglas (sin generar audio)")
         btn_dir.clicked.connect(self._on_chapter_direct)
         btns.addWidget(btn_dir)
-        btn_regen = self._btn("↻ Regen.")
+        btn_regen = self._btn("↻ Regen.", tip="Regenerar el audio del capítulo")
         btn_regen.clicked.connect(self._on_chapter_regen)
         btns.addWidget(btn_regen)
-        btn_pause = self._btn("⏸", "ghost")
+        btn_pause = self._btn("II", "ghost", "Pausar o reanudar la generación en curso")
         btn_pause.clicked.connect(self._pause_generation)
         btns.addWidget(btn_pause)
-        btn_stop = self._btn("■", "ghost")
+        btn_stop = self._btn("■", "ghost", "Detener la generación en curso")
         btn_stop.clicked.connect(self._stop_generation)
         btns.addWidget(btn_stop)
         caps.body.addLayout(btns)
@@ -340,9 +402,37 @@ class MainWindow(QFrame):
 
         det = HudPanel("SEGMENTOS DEL CAPÍTULO")
         self.segment_list = QListWidget()
+        self.segment_list.currentItemChanged.connect(self._on_segment_selected)
         det.body.addWidget(self.segment_list, 1)
+        # M7: log visible (se perdió en la reescritura Neon HUD). Las
+        # señales `log` de los workers escriben aquí, no en progress(0).
+        self.log_view = QTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumHeight(96)
+        # QTextEdit no tiene setMaximumBlockCount (es de QPlainTextEdit):
+        # el límite va en el documento. Hallado al verificar Fase 4: sin
+        # esto MainWindow no se instanciaba (AttributeError en __init__).
+        self.log_view.document().setMaximumBlockCount(500)
+        self.log_view.setPlaceholderText("// registro de generación y dirección")
+        det.body.addWidget(self.log_view)
         lay.addWidget(det, 2)
         return page
+
+    def _on_segment_selected(self, current, previous=None):
+        """Rellena los controles de Dirección con el segmento elegido (A12)."""
+        if not current or not hasattr(self, "dir_delivery"):
+            return
+        seg_id = current.data(Qt.UserRole)
+        seg = next((s for s in self._segs if s.id == seg_id), None)
+        if not seg:
+            return
+        self.dir_delivery.setCurrentText(seg.delivery or "normal")
+        self.dir_pace.setValue(seg.pace if seg.pace else 1.0)
+        self.dir_intensity.setValue(seg.intensity if seg.intensity is not None else 0.6)
+        self.dir_pb.setValue(seg.pause_before_ms or 0)
+        self.dir_pa.setValue(seg.pause_after_ms or 0)
+        if hasattr(self, "dir_emotion"):
+            self.dir_emotion.setCurrentText(seg.emotion or "neutral")
 
     def _on_chapter_generate(self):
         item = self.chapter_list.currentItem()
@@ -367,7 +457,7 @@ class MainWindow(QFrame):
                 "Selecciona un capítulo de la biblioteca antes de dirigir.")
             return
         cid = item.data(Qt.UserRole)
-        if self.worker and self.worker.isRunning():
+        if self.active_worker and self.active_worker.isRunning():
             QMessageBox.information(self, "AUREA", "Ya hay un proceso en curso.")
             return
         chapter = self.db.chapter(cid)
@@ -385,32 +475,31 @@ class MainWindow(QFrame):
             return
 
         self.status_lbl.setText(f"● Dirigiendo «{chapter.title}»…")
-        self.status_lbl.setStyleSheet(f"color:{COLORS['cyan']};font-family:monospace;font-size:11px;")
-        self.worker = DirectionWorker(cid, use_llm=False)
-        self.worker.progress.connect(
+        self.status_lbl.setStyleSheet(status_text_style(COLORS['cyan']))
+        self.active_worker = DirectionWorker(cid, use_llm=self._use_llm)
+        self.active_worker.progress.connect(
             lambda p, m: self._update_progress(p, m, COLORS['cyan']))
-        self.worker.failed.connect(self._on_dir_failed)
-        self.worker.finished_ok.connect(self._on_dir_ok)
-        self.worker.start()
+        self.active_worker.log.connect(self.log_line)
+        self.active_worker.failed.connect(self._on_dir_failed)
+        self.active_worker.cancelled.connect(self._on_dir_cancelled)
+        self.active_worker.finished_ok.connect(self._on_dir_ok)
+        self.active_worker.start()
 
     def _on_dir_failed(self, err):
+        self.active_worker = None
         self.progress_bar.hide()
         self.progress_bar.setValue(0)
         self.status_lbl.setText("● ERROR")
-        self.status_lbl.setStyleSheet(f"color:{COLORS['magenta']};font-family:monospace;font-size:11px;")
+        self.status_lbl.setStyleSheet(status_text_style(COLORS['magenta']))
         toast(self, f"✗ Error al dirigir: {err}", kind="error")
 
-    def _on_dir_ok(self, rules_count, llm_count):
-        msg = f"✔ {rules_count} segmentos dirigidos"
-        if llm_count:
-            msg += f" + {llm_count} con Ollama"
+    def _on_dir_cancelled(self):
+        self.active_worker = None
         self.progress_bar.hide()
         self.progress_bar.setValue(0)
-        self.status_lbl.setText("● KOKORO FP16 · LISTO")
-        self.status_lbl.setStyleSheet(f"color:{COLORS['green']};font-family:monospace;font-size:11px;")
-        toast(self, msg + ". Ahora genera el audio.", kind="ok")
-        self._refresh_chapters()
-        self._refresh_segments_for_current()
+        self.status_lbl.setText("● LISTO")
+        self.status_lbl.setStyleSheet(status_text_style(COLORS['green']))
+        toast(self, "■ Dirección cancelada", kind="warn")
 
     def _ensure_segments(self, cid):
         """Crea segmentos vacíos para un capítulo si no existen."""
@@ -443,7 +532,7 @@ class MainWindow(QFrame):
             QMessageBox.information(self, "AUREA",
                 "Selecciona un capítulo de la biblioteca antes de generar.")
             return
-        if self.worker and self.worker.isRunning():
+        if self.active_worker and self.active_worker.isRunning():
             QMessageBox.information(self, "AUREA", "Ya hay un proceso en curso.")
             return
         chapter = self.db.chapter(cid)
@@ -472,23 +561,26 @@ class MainWindow(QFrame):
         if pending:
             # Primero dirigir, luego generar
             self.status_lbl.setText(f"● Dirigiendo «{chapter.title}» antes de generar…")
-            self.status_lbl.setStyleSheet(f"color:{COLORS['cyan']};font-family:monospace;font-size:11px;")
+            self.status_lbl.setStyleSheet(status_text_style(COLORS['cyan']))
             self._pending_gen = (chapter, force)
-            self.worker = DirectionWorker(cid, use_llm=False)
-            self.worker.progress.connect(
+            self.active_worker = DirectionWorker(cid, use_llm=self._use_llm)
+            self.active_worker.progress.connect(
                 lambda p, m: self._update_progress(p, m, COLORS['cyan']))
-            self.worker.failed.connect(self._on_gen_chain_failed)
-            self.worker.finished_ok.connect(self._on_gen_chain_ok)
-            self.worker.start()
+            self.active_worker.log.connect(self.log_line)
+            self.active_worker.failed.connect(self._on_gen_chain_failed)
+            self.active_worker.cancelled.connect(self._on_dir_cancelled)
+            self.active_worker.finished_ok.connect(self._on_gen_chain_ok)
+            self.active_worker.start()
         else:
             # Ya está dirigido, generar directamente
             self._generate_chapter_inner(chapter, force)
 
     def _on_gen_chain_failed(self, err):
+        self.active_worker = None
         self.progress_bar.hide()
         self.progress_bar.setValue(0)
         self.status_lbl.setText("● ERROR")
-        self.status_lbl.setStyleSheet(f"color:{COLORS['magenta']};font-family:monospace;font-size:11px;")
+        self.status_lbl.setStyleSheet(status_text_style(COLORS['magenta']))
         toast(self, f"✗ Error al dirigir: {err}", kind="error")
         self._pending_gen = None
 
@@ -497,60 +589,85 @@ class MainWindow(QFrame):
         if llm_count:
             msg += f" + {llm_count} con Ollama"
         self.status_lbl.setText("● Generando audio…")
-        self.status_lbl.setStyleSheet(f"color:{COLORS['amber']};font-family:monospace;font-size:11px;")
+        self.status_lbl.setStyleSheet(status_text_style(COLORS['amber']))
         toast(self, msg + ". Generando audio…", kind="info")
         chapter, force = self._pending_gen
         self._pending_gen = None
+        self.active_worker = None  # el director terminó; libre para generar
         self._generate_chapter_inner(chapter, force)
 
     def _generate_chapter_inner(self, chapter, force: bool):
         """Genera el audio del capítulo (ya debe estar dirigido)."""
         cid = chapter.id
-        if self.worker and self.worker.isRunning():
+        if self.active_worker and self.active_worker.isRunning():
             QMessageBox.information(self, "AUREA", "Ya hay un proceso en curso.")
             return
         self.status_lbl.setText(f"● Generando «{chapter.title}»…")
-        self.status_lbl.setStyleSheet(f"color:{COLORS['amber']};font-family:monospace;font-size:11px;")
-        self.worker = ChapterGenerator(chapter, "em_alex", 1.0, force=force)
-        self.worker.progress.connect(
+        self.status_lbl.setStyleSheet(status_text_style(COLORS['amber']))
+        self.active_worker = ChapterGenerator(chapter, "em_alex", 1.0, force=force)
+        self.active_worker.progress.connect(
             lambda p, m: self._update_progress(p, m, COLORS['amber']))
-        self.worker.failed.connect(self._on_gen_failed)
-        self.worker.finished_ok.connect(self._on_gen_ok)
-        self.worker.start()
+        self.active_worker.log.connect(self.log_line)
+        self.active_worker.failed.connect(self._on_gen_failed)
+        self.active_worker.cancelled.connect(self._on_gen_cancelled)
+        self.active_worker.finished_ok.connect(self._on_gen_ok)
+        self.active_worker.start()
 
     def _on_gen_failed(self, err):
+        self.active_worker = None
         self.progress_bar.hide()
         self.progress_bar.setValue(0)
         self.status_lbl.setText("● ERROR")
-        self.status_lbl.setStyleSheet(f"color:{COLORS['magenta']};font-family:monospace;font-size:11px;")
+        self.status_lbl.setStyleSheet(status_text_style(COLORS['magenta']))
         toast(self, f"✗ Error: {err}", kind="error")
+        self._refresh_health()
 
-    def _on_gen_ok(self, wav):
+    def _on_gen_cancelled(self):
+        self.active_worker = None
         self.progress_bar.hide()
         self.progress_bar.setValue(0)
-        self.status_lbl.setText("● KOKORO FP16 · LISTO")
-        self.status_lbl.setStyleSheet(f"color:{COLORS['green']};font-family:monospace;font-size:11px;")
+        self.status_lbl.setText("● LISTO")
+        self.status_lbl.setStyleSheet(status_text_style(COLORS['green']))
+        toast(self, "■ Generación cancelada (los segmentos ya generados se reutilizan)", kind="warn")
+        self._refresh_segments_for_current()
+
+    def _on_gen_ok(self, wav):
+        self.active_worker = None
+        self.progress_bar.hide()
+        self.progress_bar.setValue(0)
+        self.status_lbl.setText("● LISTO")
+        self.status_lbl.setStyleSheet(status_text_style(COLORS['green']))
         self._last_wav = wav
-        toast(self, "✅ Capítulo generado", kind="ok")
+        toast(self, "✓ Capítulo generado", kind="ok")
         self.wave.set_wav(wav)
         self._refresh_segments_for_current()
         self._refresh_chapters()
+        self._refresh_health()
 
     def _pause_generation(self):
-        if self.worker and self.worker.isRunning():
-            self.worker.quit()
-            toast(self, "⏸ Producción pausada", kind="info")
+        # C5: pausa REAL por flag (el bucle la comprueba entre segmentos).
+        # Antes era QThread.quit(), que no hace nada en un run() bloqueante.
+        w = self.active_worker
+        if w and w.isRunning() and hasattr(w, "request_pause"):
+            if w.paused:
+                w.request_resume()
+                toast(self, "▶ Producción reanudada", kind="info")
+            else:
+                w.request_pause()
+                toast(self, "II Producción en pausa", kind="info")
 
     def _stop_generation(self):
-        if self.worker and self.worker.isRunning():
-            self.worker.quit()
-            self.worker.wait()
-            self.worker = None
-            toast(self, "⏹ Producción detenida", kind="warn")
+        # C5: stop REAL por flag, sin wait() en el hilo de UI (antes el
+        # wait() congelaba la ventana hasta que el capítulo terminaba).
+        w = self.active_worker
+        if w and w.isRunning() and hasattr(w, "request_cancel"):
+            w.request_cancel()
+            toast(self, "■ Parando…", kind="warn")
 
     def log_line(self, msg):
-        # Se conectará al QTextEdit de la página estudio si existe
-        pass
+        # M7: el log visible de la página Estudio.
+        if hasattr(self, "log_view"):
+            self.log_view.append(msg)
 
     def _refresh_segments_for_current(self):
         if not self._current_chapter_id:
@@ -577,15 +694,15 @@ class MainWindow(QFrame):
     def _page_reparto(self) -> QWidget:
         page = QWidget()
         lay = QHBoxLayout(page)
-        lay.setContentsMargins(12, 12, 12, 12)
-        lay.setSpacing(12)
+        lay.setContentsMargins(SPACING_MD, SPACING_MD, SPACING_MD, SPACING_MD)
+        lay.setSpacing(SPACING_SM)
 
         panel = HudPanel("REPARTO DEL LIBRO", "DETECCIÓN + VOCES")
         btns = QHBoxLayout()
-        btn_detect = self._btn("⚡ Detectar reparto", "primary")
+        btn_detect = self._btn("▸ Detectar reparto", "primary", "Detectar los personajes del libro")
         btn_detect.clicked.connect(self._detect_cast)
         btns.addWidget(btn_detect)
-        btn_apply = self._btn("✔ Aplicar voces", "ghost")
+        btn_apply = self._btn("✔ Aplicar voces", "ghost", "Ir a la página de voz clonada para asignar voces")
         btn_apply.clicked.connect(self._apply_cast_voices)
         btns.addWidget(btn_apply)
         btns.addStretch(1)
@@ -607,11 +724,9 @@ class MainWindow(QFrame):
         if not self._current_book_id:
             return
         chars = self.db.characters(self._current_book_id)
-        clones = clone_store.list_profiles()
-        clone_names = {p["name"] for p in clones}
 
         for ch in chars:
-            tag = " 🎙️ narrador" if ch.is_narrator else ""
+            tag = " ● narrador" if ch.is_narrator else ""
             engine = getattr(ch, 'engine', 'kokoro') or 'kokoro'
             voice_label = ch.voice
             if engine == "xtts" and ch.voice_profile_id:
@@ -630,12 +745,15 @@ class MainWindow(QFrame):
         texts = [c.text for c in self.db.chapters(self._current_book_id)]
         names = detect_characters(texts)
         created = CastManager(self.db).build_cast(self._current_book_id, names)
-        self.log_line(f"🎭 Reparto: {len(names)} personajes detectados, {created} nuevos")
-        toast(self, f"🎭 Reparto: {len(names)} personajes", kind="ok")
+        self.log_line(f"◆ Reparto: {len(names)} personajes detectados, {created} nuevos")
+        toast(self, f"◆ Reparto: {len(names)} personajes", kind="ok")
         self._refresh_cast()
 
     def _apply_cast_voices(self):
-        toast(self, "Usa la página 'Voz clonada' para asignar voces a personajes", kind="info")
+        # A12: antes solo mostraba un toast. Las voces se asignan en la
+        # página "Voz clonada": llevar ahí al usuario es la acción real.
+        self.sidebar.set_active("voz")
+        toast(self, "Asigna las voces en 'Voz clonada' y vuelve al reparto", kind="info")
 
     # ================================================================
     # PÁGINA 3 · DIRECCIÓN
@@ -643,22 +761,33 @@ class MainWindow(QFrame):
     def _page_direccion(self) -> QWidget:
         page = QWidget()
         lay = QHBoxLayout(page)
-        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setContentsMargins(SPACING_MD, SPACING_MD, SPACING_MD, SPACING_MD)
 
         panel = HudPanel("DIRECCIÓN NARRATIVA", "REGLAS + OLLAMA OPCIONAL")
         btns = QHBoxLayout()
-        btn_dir = self._btn("🎬 Dirigir capítulo (instantáneo)", "primary")
-        btn_dir.clicked.connect(self._direct_chapter)
+        btn_dir = self._btn("▸ Dirigir capítulo (instantáneo)", "primary", "Dirigir el capítulo con reglas")
+        btn_dir.clicked.connect(lambda: self._direct_chapter(use_llm=False))
         btns.addWidget(btn_dir)
-        btn_llm = self._btn("Refinar con Ollama (lento)", "ghost")
+        # A10: el botón Ollama vuelve a existir y hace algo: dirige con
+        # refinamiento LLM (use_llm=True). Antes no tenía clicked conectado.
+        btn_llm = self._btn("Refinar con Ollama (lento)", "ghost", "Dirigir con refinamiento de Ollama (lento)")
+        btn_llm.clicked.connect(lambda: self._direct_chapter(use_llm=True))
         btns.addWidget(btn_llm)
         btns.addStretch(1)
         panel.body.addLayout(btns)
 
+        # A10: casilla que gobierna el refinamiento Ollama también en la
+        # página Estudio (Dirigir / Generar).
+        self.ollama_check = QCheckBox("Refinar con Ollama al dirigir")
+        self.ollama_check.toggled.connect(self._on_ollama_toggled)
+        panel.body.addWidget(self.ollama_check)
+
         grid = QGridLayout()
         grid.setHorizontalSpacing(16)
+        self.dir_emotion = QComboBox()
+        self.dir_emotion.addItems(sorted(EMOTIONS))
         self.dir_delivery = QComboBox()
-        self.dir_delivery.addItems(["normal", "susurro", "grito"])
+        self.dir_delivery.addItems(["normal", "susurro", "bajo", "firme", "elevado", "grito"])
         self.dir_pace = QDoubleSpinBox()
         self.dir_pace.setRange(0.6, 1.3)
         self.dir_pace.setSingleStep(0.05)
@@ -676,6 +805,7 @@ class MainWindow(QFrame):
         self.dir_pa.setSuffix(" ms")
 
         for r, (lbl, wdg) in enumerate([
+            ("EMOCIÓN", self.dir_emotion),
             ("ENTREGA", self.dir_delivery),
             ("RITMO", self.dir_pace),
             ("INTENSIDAD", self.dir_intensity),
@@ -686,33 +816,69 @@ class MainWindow(QFrame):
             grid.addWidget(wdg, r, 1)
         grid.setColumnStretch(2, 1)
         panel.body.addLayout(grid)
+        # A12: aplicar los controles al segmento seleccionado (antes no se
+        # leían en ningún sitio).
+        btn_apply_seg = self._btn("✓ Aplicar al segmento seleccionado", "primary", "Aplicar emoción, entrega, ritmo e intensidad al segmento seleccionado")
+        btn_apply_seg.clicked.connect(self._apply_segment_direction)
+        panel.body.addWidget(btn_apply_seg)
         panel.body.addStretch(1)
         lay.addWidget(panel, 1)
         return page
 
-    def _direct_chapter(self):
+    def _on_ollama_toggled(self, checked):
+        self._use_llm = bool(checked)
+
+    def _apply_segment_direction(self):
+        """Aplica los controles de Dirección al segmento seleccionado."""
+        item = self.segment_list.currentItem()
+        if not item:
+            QMessageBox.information(self, "AUREA", "Selecciona un segmento de la lista.")
+            return
+        seg_id = item.data(Qt.UserRole)
+        self.db.update_direction(
+            seg_id,
+            self.dir_emotion.currentText(),
+            self.dir_delivery.currentText(),
+            float(self.dir_intensity.value()),
+            float(self.dir_pace.value()),
+            int(self.dir_pb.value()),
+            int(self.dir_pa.value()),
+            directed=1,
+        )
+        self._refresh_segments_for_current()
+        toast(self, "✓ Dirección aplicada al segmento", kind="ok")
+
+    def _direct_chapter(self, use_llm=False):
         cid = self._current_chapter_id
         if not cid:
             QMessageBox.information(self, "AUREA", "Selecciona un capítulo.")
             return
-        if self.director and self.director.isRunning():
-            QMessageBox.information(self, "AUREA", "Ya hay una dirección en curso.")
+        if self.active_worker and self.active_worker.isRunning():
+            QMessageBox.information(self, "AUREA", "Ya hay un proceso en curso.")
+            return
+        # M6: crear los segmentos si el capítulo es nuevo (antes fallaba
+        # con "genera primero el capítulo" aunque dirigir los crea).
+        if not self._ensure_segments(cid):
+            QMessageBox.information(self, "AUREA", "No se pudieron crear segmentos.")
             return
         self.status_lbl.setText("● Dirigiendo con reglas…")
-        self.status_lbl.setStyleSheet(f"color:{COLORS['cyan']};font-family:monospace;font-size:11px;")
-        self.director = DirectionWorker(cid, use_llm=False)
-        self.director.progress.connect(
+        self.status_lbl.setStyleSheet(status_text_style(COLORS['cyan']))
+        self.active_worker = DirectionWorker(cid, use_llm=bool(use_llm or self._use_llm))
+        self.active_worker.progress.connect(
             lambda p, m: self._update_progress(p, m, COLORS['cyan']))
-        self.director.failed.connect(lambda e: toast(self, f"✗ Dirección: {e}", kind="error"))
-        self.director.finished_ok.connect(self._on_dir_ok)
-        self.director.start()
+        self.active_worker.log.connect(self.log_line)
+        self.active_worker.failed.connect(lambda e: toast(self, f"✗ Dirección: {e}", kind="error"))
+        self.active_worker.cancelled.connect(self._on_dir_cancelled)
+        self.active_worker.finished_ok.connect(self._on_dir_ok)
+        self.active_worker.start()
 
     def _on_dir_ok(self, rules_count, llm_count):
+        self.active_worker = None
         msg = f"✔ {rules_count} segmentos dirigidos por reglas"
         if llm_count:
             msg += f" + {llm_count} refinados con Ollama"
-        self.status_lbl.setText("● KOKORO FP16 · LISTO")
-        self.status_lbl.setStyleSheet(f"color:{COLORS['green']};font-family:monospace;font-size:11px;")
+        self.status_lbl.setText("● LISTO")
+        self.status_lbl.setStyleSheet(status_text_style(COLORS['green']))
         toast(self, msg + ". Regenera para escuchar.", kind="ok")
         self._refresh_chapters()
         self._refresh_segments_for_current()
@@ -723,8 +889,8 @@ class MainWindow(QFrame):
     def _page_voz(self) -> QWidget:
         page = QWidget()
         lay = QHBoxLayout(page)
-        lay.setContentsMargins(12, 12, 12, 12)
-        lay.setSpacing(12)
+        lay.setContentsMargins(SPACING_MD, SPACING_MD, SPACING_MD, SPACING_MD)
+        lay.setSpacing(SPACING_SM)
 
         panel = HudPanel("VOCES CLONADAS · XTTS v2")
 
@@ -739,69 +905,47 @@ class MainWindow(QFrame):
         if hasattr(self, "clone_panel"):
             self.clone_panel.set_book_id(self._current_book_id)
 
-    def _import_voice_sample(self):
-        if not self._current_book_id:
-            QMessageBox.information(self, "AUREA",
-                                    "Selecciona un libro primero.")
-            return
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Importar muestra de voz",
-            str(Path.home() / "aurea" / "voices"),
-            "Audio (*.wav *.mp3 *.flac *.m4a *.ogg *.opus)")
-        if not path:
-            return
-        from PySide6.QtWidgets import QInputDialog
-        name, ok = QInputDialog.getText(self, "Nombre del perfil",
-                                        "Nombre para esta voz clonada:")
-        if not ok or not name.strip():
-            return
-        try:
-            from aurea.voice import sample_prep
-            pid, report = sample_prep.import_sample(path, name.strip())
-            self.log_line(
-                f"🎙 Muestra importada: «{name.strip()}» "
-                f"({report['duration']}s, SNR {report['snr_db']} dB, "
-                f"{report['verdict']})")
-            toast(self, f"🎙 Voz clonada: «{name.strip()}»", kind="ok")
-            self.clone_panel.refresh()
-        except Exception as e:  # noqa: BLE001
-            QMessageBox.warning(self, "Importar voz",
-                                f"No se pudo importar:\n{e}")
-
     # ================================================================
     # TRANSPORTE
     # ================================================================
     def _build_transport(self) -> QFrame:
         t = QFrame()
+        t.setObjectName("transportBar")  # estilo en theme.py QSS, no ad hoc
         t.setFixedHeight(74)
-        t.setStyleSheet(
-            f"background:{COLORS['panel']}; border-top:1px solid {COLORS['line']};"
-        )
         lay = QHBoxLayout(t)
         lay.setContentsMargins(16, 8, 16, 8)
-        lay.setSpacing(14)
+        lay.setSpacing(16)
 
-        btn_play = self._btn("▶")
-        btn_play.clicked.connect(self._play)
-        lay.addWidget(btn_play)
-        btn_stop = self._btn("■")
-        btn_stop.clicked.connect(self._stop_playback)
-        lay.addWidget(btn_stop)
+        # Botones de transporte: se guardan como atributos para que el
+        # estado del reproductor pueda alternar ▶/II (ver
+        # _on_player_state_changed). El clic usa _toggle_playback, que
+        # pausa si suena y si no llama a _play (cuyo comportamiento no cambia).
+        self.btn_play = self._btn("▶", tip="Reproducir o pausar (Espacio o Ctrl+Espacio)")
+        self.btn_play.setProperty("transport", "true")
+        self.btn_play.clicked.connect(self._toggle_playback)
+        lay.addWidget(self.btn_play)
+        self.btn_stop_play = self._btn("■", tip="Detener reproducción (S)")
+        self.btn_stop_play.setProperty("transport", "true")
+        self.btn_stop_play.clicked.connect(self._stop_playback)
+        lay.addWidget(self.btn_stop_play)
 
         self.time_lbl = QLabel("00:00 / 00:00")
-        self.time_lbl.setStyleSheet(f"font-family:monospace;color:{COLORS['dim']};")
+        self.time_lbl.setObjectName("timeLabel")  # estilo en theme.py QSS
         lay.addWidget(self.time_lbl)
 
         self.wave = WaveformView()
         lay.addWidget(self.wave, 1)
 
         lay.addWidget(QLabel("VOL"))
-        vol = QSlider(Qt.Horizontal)
-        vol.setFixedWidth(90)
-        vol.setRange(0, 100)
-        vol.setValue(80)
-        vol.valueChanged.connect(self._set_volume)
-        lay.addWidget(vol)
+        # M19: guardar la referencia (antes el deslizador era una variable
+        # local y _play ignoraba su valor, fijando 0.8 siempre).
+        self.vol_slider = QSlider(Qt.Horizontal)
+        self.vol_slider.setFixedWidth(90)
+        self.vol_slider.setRange(0, 100)
+        self.vol_slider.setValue(int(self._volume * 100))
+        self.vol_slider.setToolTip("Volumen de reproducción")
+        self.vol_slider.valueChanged.connect(self._set_volume)
+        lay.addWidget(self.vol_slider)
         return t
 
     def _play(self):
@@ -824,7 +968,8 @@ class MainWindow(QFrame):
             self.player.setAudioOutput(self.audio_out)
             self.player.positionChanged.connect(self._on_position_changed)
         self.player.setSource(QUrl.fromLocalFile(wav))
-        self.audio_out.setVolume(0.8)
+        # M19: respetar el deslizador (antes fijaba 0.8 siempre).
+        self.audio_out.setVolume(self._volume)
         self.player.play()
         self.wave.set_wav(wav)
 
@@ -832,9 +977,88 @@ class MainWindow(QFrame):
         if self.player:
             self.player.stop()
 
+    # --- Transporte premium: SOLO presentación ---
+    # _play / _stop_playback / _set_volume NO se tocan. Lo nuevo es el
+    # cableado de presentación: el botón alterna ▶/II según el estado del
+    # reproductor y hay atajos de teclado.
+    def _setup_transport_shortcuts(self):
+        """Atajos del transporte (Fase 4).
+
+        Ctrl+Espacio: reproducir/pausar en toda la ventana. Espacio y S se
+        gestionan en keyPressEvent y solo actúan cuando el foco NO está en
+        un control editable ni en un botón, para no romper la escritura ni
+        la activación de botones con Espacio. No había atajos previos en la
+        app con los que colisionar.
+        """
+        sc_play = QShortcut(QKeySequence("Ctrl+Space"), self)
+        sc_play.activated.connect(self._toggle_playback)
+
+    def _toggle_playback(self):
+        """Reproducir/pausar desde el botón ▶/II o el atajo.
+
+        Si no suena nada, delega en _play (sin cambiarlo); si suena, pausa;
+        si está en pausa, reanuda. El cableado de playbackStateChanged se
+        hace aquí, tras crear el reproductor, para no tocar _play.
+        """
+        if self.player is not None:
+            if self.player.playbackState() == QMediaPlayer.PlayingState:
+                self.player.pause()
+                return
+            if self.player.playbackState() == QMediaPlayer.PausedState:
+                self.player.play()
+                return
+        self._play()
+        if self.player is not None and not self._player_state_wired:
+            self.player.playbackStateChanged.connect(self._on_player_state_changed)
+            self._player_state_wired = True
+            self._on_player_state_changed(self.player.playbackState())
+
+    def _on_player_state_changed(self, state):
+        """Refleja el estado del reproductor en el botón play (▶/II)."""
+        if not hasattr(self, "btn_play"):
+            return
+        if state == QMediaPlayer.PlayingState:
+            self.btn_play.setText("II")
+            self.btn_play.setToolTip("Pausar (Espacio o Ctrl+Espacio)")
+        else:
+            self.btn_play.setText("▶")
+            self.btn_play.setToolTip("Reproducir o pausar (Espacio o Ctrl+Espacio)")
+
+    def keyPressEvent(self, event):  # noqa: N802
+        """Espacio = reproducir/pausar, S = detener (transporte).
+
+        Solo cuando el foco no está en un control editable (escribir no
+        debe parar el audio) ni en un botón (Espacio es su activación).
+        En listas el atajo puede no llegar si el widget consume la tecla
+        (búsqueda por teclado); Ctrl+Espacio siempre funciona.
+        """
+        from PySide6.QtWidgets import (
+            QComboBox as _QComboBox,
+            QDoubleSpinBox as _QDoubleSpinBox,
+            QLineEdit as _QLineEdit,
+            QSpinBox as _QSpinBox,
+            QTextEdit as _QTextEdit,
+        )
+
+        focus = QApplication.focusWidget()
+        editable = isinstance(
+            focus, (_QLineEdit, _QTextEdit, _QComboBox, _QSpinBox, _QDoubleSpinBox)
+        )
+        if not editable and not isinstance(focus, QAbstractButton):
+            if event.key() == Qt.Key_Space:
+                self._toggle_playback()
+                event.accept()
+                return
+            if event.key() == Qt.Key_S:
+                self._stop_playback()
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
     def _set_volume(self, val):
+        self._volume = val / 100.0
         if self.audio_out:
-            self.audio_out.setVolume(val / 100.0)
+            self.audio_out.setVolume(self._volume)
 
     def _on_position_changed(self, pos):
         if self.player and self.player.duration() > 0:
@@ -845,6 +1069,12 @@ class MainWindow(QFrame):
             self.time_lbl.setText(f"{m:02d}:{s:02d} / {tm:02d}:{ts:02d}")
 
     # ================================================================
+    def _on_sidebar_footer(self, key: str) -> None:
+        # A12: la papelera del sidebar borra el libro seleccionado (con
+        # confirmación, vía _delete_book); antes solo parpadeaba.
+        if key == "borrar":
+            self._delete_book()
+
     def _on_section(self, key: str) -> None:
         idx = {k: i for i, (k, _, _) in enumerate(SECTIONS)}.get(key)
         if idx is not None:

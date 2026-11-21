@@ -6,22 +6,53 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 DB_PATH = os.path.join(_ROOT, "aurea.db")
 VOICES_DIR = os.path.join(_ROOT, "voices")
 
+def _db_path():
+    """Ruta de la BD: AUREA_DB_PATH (tests) o AUREA_HOME/aurea.db o
+    aurea.db junto al repo.
+    En producción el repo vive en ~/aurea, así que coincide con la BD
+    de Database (~/aurea/aurea.db). M26.
+    Antes solo se honraba AUREA_DB_PATH: con AUREA_HOME redirigido
+    (tests) clone_store seguía abriendo la BD junto al repo y
+    clone_sample_map() reventaba con "no such table: characters"
+    porque esa BD solo tenía voice_profiles."""
+    if os.environ.get("AUREA_DB_PATH"):
+        return os.environ["AUREA_DB_PATH"]
+    home = os.environ.get("AUREA_HOME")
+    if home:
+        return os.path.join(home, "aurea.db")
+    return DB_PATH
+
 def _connect():
-    con = sqlite3.connect(DB_PATH)
+    con = sqlite3.connect(_db_path())
+    con.execute("PRAGMA foreign_keys=ON")  # C4
     con.row_factory = sqlite3.Row
     return con
 
 
 def clone_sample_map():
-    """Return a dict mapping character_id to sample_path from voice_profiles."""
+    """Return a dict mapping character_id to sample_path from voice_profiles.
+
+    Si la BD no es la del proyecto (p. ej. una BD que solo tiene
+    voice_profiles, sin tabla characters ni columna voice_profile_id),
+    no hay nada que mapear: devuelve {} en vez de reventar con
+    "no such table: characters" (eso tumbaba TODA la generación,
+    porque ChapterGenerator llama a esto siempre antes de sintetizar).
+    """
     ensure_schema()
     con = _connect()
-    rows = con.execute(
-        "SELECT p.name, cp.id, p.sample_path "
-        "FROM voice_profiles p "
-        "JOIN characters cp ON cp.voice_profile_id = p.id"
-    ).fetchall()
-    con.close()
+    try:
+        if not _table_exists(con, "characters"):
+            return {}
+        cols = {r[1] for r in con.execute("PRAGMA table_info(characters)")}
+        if "voice_profile_id" not in cols:
+            return {}
+        rows = con.execute(
+            "SELECT p.name, cp.id, p.sample_path "
+            "FROM voice_profiles p "
+            "JOIN characters cp ON cp.voice_profile_id = p.id"
+        ).fetchall()
+    finally:
+        con.close()
     return {row["id"]: row["sample_path"] for row in rows}
 
 
@@ -83,9 +114,16 @@ def delete_profile(pid):
     con.execute("DELETE FROM voice_profiles WHERE id=?", (pid,))
     con.commit(); con.close()
 
-def assign_character(character_id, engine, profile_id=None):
+def assign_character(character_id, engine, profile_id=None, voice=None):
+    """Asigna motor (y perfil clonado) a un personaje. Con voice no None
+    también guarda la voz Kokoro elegida (C3: antes la rama Kokoro del
+    panel anunciaba la voz pero solo tocaba engine/profile_id)."""
     ensure_schema()
     con = _connect()
-    con.execute("UPDATE characters SET engine=?, voice_profile_id=? WHERE id=?",
-                (engine, profile_id, character_id))
+    if voice is not None:
+        con.execute("UPDATE characters SET engine=?, voice_profile_id=?, voice=? "
+                    "WHERE id=?", (engine, profile_id, voice, character_id))
+    else:
+        con.execute("UPDATE characters SET engine=?, voice_profile_id=? WHERE id=?",
+                    (engine, profile_id, character_id))
     con.commit(); con.close()

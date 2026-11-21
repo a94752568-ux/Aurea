@@ -6,6 +6,12 @@ import soundfile as sf
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 VOICES_DIR = os.path.join(_ROOT, "voices")
 
+def _voices_dir():
+    """Dir de muestras: AUREA_VOICES_DIR (tests) o voices/ junto al repo.
+    Se lee en cada llamada para que los tests puedan cambiarlo tras
+    importar el módulo (mismo patrón que _db_path en clone_store)."""
+    return os.environ.get("AUREA_VOICES_DIR") or VOICES_DIR
+
 SR = 22050
 MIN_SEC, MAX_SEC = 6.0, 60.0
 VALID = (".mp3", ".wav", ".flac", ".m4a", ".ogg", ".opus")
@@ -58,9 +64,9 @@ def import_sample(src_path, profile_name):
     """Convierte, analiza y registra el perfil. Devuelve (profile_id, report)."""
     if not src_path.lower().endswith(VALID):
         raise ValueError(f"Formato no soportado: {src_path}")
-    os.makedirs(VOICES_DIR, exist_ok=True)
+    os.makedirs(_voices_dir(), exist_ok=True)
     safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in profile_name)
-    out = os.path.join(VOICES_DIR, f"{safe}.wav")
+    out = os.path.join(_voices_dir(), f"{safe}.wav")
     convert(src_path, out)
     report = analyze(out)
     if report["duration"] < MIN_SEC:

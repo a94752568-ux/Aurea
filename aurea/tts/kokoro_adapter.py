@@ -52,7 +52,9 @@ class KokoroAdapter:
     @staticmethod
     def save_wav(path, samples, sr):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        sf.write(str(path), samples, sr)
+        # A7: PCM_16 siempre. Los WAV float32 no los leía _wav_peaks
+        # (exige 16-bit) y la forma de onda nunca se dibujaba.
+        sf.write(str(path), samples, sr, subtype="PCM_16")
 
     def free(self):
         self._kokoro = None

@@ -32,7 +32,7 @@ class XTTSAdapter:
                                 language=language, speed=speed)
         audio = np.asarray(wav, dtype=np.float32)
         if out_path:
-            sf.write(out_path, audio, self.SAMPLE_RATE)
+            sf.write(out_path, audio, self.SAMPLE_RATE, subtype="PCM_16")  # A7
         return audio, self.SAMPLE_RATE
 
     def cancel(self):

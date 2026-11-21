@@ -7,23 +7,57 @@ Casos de prueba (todos deben pasar):
 3. Aplicar dos veces deja los mismos valores (idempotente).
 4. Los defaults por verbo (susurró→susurro, gritó→grito, ordenó→firme)
    se aplican cuando no hay fila de CSV.
+
+M22: antes usaba la BD REAL de producción (/home/aegis2/aurea) y
+esperaba las escalas VIEJAS (pace 1.5/0.7, intensidad 1-5). Ahora usa
+BD temporal (AUREA_HOME) y las escalas decididas (pace = velocidad
+0.6-1.3, intensidad 0-1 con (n-1)/4).
 """
-import sys
-import os
-import tempfile
 import csv
+import os
+import sys
+import tempfile
 
-sys.path.insert(0, "/home/aegis2/aurea")
+# Raíz del repo (este script vive en scripts/): nunca /home/aegis2/aurea.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from aurea.core.database import Database
-from aurea.casting.cast_manager import CastManager
-from aurea.casting.detector import detect_characters
-from aurea.core.generator import segmentize
-from aurea.direction.rules import direct_segment
-from scripts.aplicar_direccion import apply_direction
+# Stubs de Kokoro/XTTS: la VM no tiene kokoro_onnx/misaki instalados.
+import types as _types
+_kokoro = _types.ModuleType("kokoro_onnx")
+_kokoro.Kokoro = object
+sys.modules.setdefault("kokoro_onnx", _kokoro)
+_misaki = _types.ModuleType("misaki")
+_espeak = _types.ModuleType("misaki.espeak")
+_espeak.EspeakG2P = object
+_espeak.EspeakFallback = object
+_misaki.espeak = _espeak
+sys.modules.setdefault("misaki", _misaki)
+sys.modules.setdefault("misaki.espeak", _espeak)
 
-DB_PATH = "/home/aegis2/aurea/aurea.db"
+_TMP = tempfile.mkdtemp(prefix="aurea-verificar-direccion-")
+os.environ["AUREA_HOME"] = _TMP  # BD temporal, nunca producción
+os.environ["AUREA_DB_PATH"] = os.path.join(_TMP, "aurea.db")
+
+from aurea.casting.cast_manager import CastManager  # noqa: E402
+from aurea.casting.detector import detect_characters  # noqa: E402
+from aurea.core.database import Database  # noqa: E402
+from aurea.core.generator import segmentize  # noqa: E402
+from aurea.direction.rules import direct_segment  # noqa: E402
+from scripts.aplicar_direccion import apply_direction  # noqa: E402
+
 FAILURES = []
+
+
+def csv_temp(rows):
+    """CSV temporal con NamedTemporaryFile (mktemp está obsoleto)."""
+    f = tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False,
+                                   newline="", encoding="utf-8")
+    writer = csv.writer(f)
+    writer.writerow(["escena", "turno", "personaje", "emocion", "volumen",
+                     "ritmo", "intensidad"])
+    writer.writerows(rows)
+    f.close()
+    return f.name
 
 
 def check(name, condition, detail=""):
@@ -90,13 +124,11 @@ def main():
 
     # Caso 1: Aplicar CSV con personaje correcto
     print("\n== Caso 1: Aplicar CSV con personajes correctos ==")
-    csv_path = tempfile.mktemp(suffix=".csv")
-    with open(csv_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["escena", "turno", "personaje", "emocion", "volumen", "ritmo", "intensidad"])
-        writer.writerow([1, 1, "Alberto", "miedo", "susurro", "lento", 3])
-        writer.writerow([1, 2, "Elena", "enojo", "grito", "rápido", 5])
-        writer.writerow([1, 3, "Marco", "determinación", "firme", "normal", 4])
+    csv_path = csv_temp([
+        [1, 1, "Alberto", "miedo", "susurro", "lento", 3],
+        [1, 2, "Elena", "enojo", "grito", "rápido", 5],
+        [1, 3, "Marco", "determinación", "firme", "normal", 4],
+    ])
 
     aplicadas, errores = apply_direction(book_id, csv_path, 0)
     check("Aplicar CSV aplica 3 segmentos", aplicadas == 3,
@@ -113,38 +145,43 @@ def main():
               f"directed={s.directed}")
 
     # Alberto: miedo, susurro, lento, intensidad 3
+    # Escalas decididas: pace = factor de VELOCIDAD (lento = 0.75, no 1.5);
+    # intensidad CSV 1-5 -> 0-1 con (n-1)/4 (3 -> 0.5).
     seg_alberto = segs[0]  # —Dijo Alberto.
     check("Alberto: emotion=miedo", seg_alberto.emotion == "miedo",
           f"obtuvo {seg_alberto.emotion}")
     check("Alberto: delivery=susurro", seg_alberto.delivery == "susurro",
           f"obtuvo {seg_alberto.delivery}")
-    check("Alberto: pace=lento (1.5)", seg_alberto.pace == 1.5,
+    check("Alberto: pace=lento (0.75 velocidad)", seg_alberto.pace == 0.75,
           f"obtuvo {seg_alberto.pace}")
-    check("Alberto: intensity=3", seg_alberto.intensity == 3,
+    check("Alberto: intensity=3 -> 0.5", seg_alberto.intensity == 0.5,
           f"obtuvo {seg_alberto.intensity}")
     check("Alberto: directed=1", seg_alberto.directed == 1,
           f"obtuvo {seg_alberto.directed}")
 
-    # Elena: enojo, grito, rápido, intensidad 5
+    # Elena: enojo, grito, rápido, intensidad 5 -> 1.0
     seg_elena = segs[1]  # —Gritó Elena.
     check("Elena: emotion=enojo", seg_elena.emotion == "enojo",
           f"obtuvo {seg_elena.emotion}")
     check("Elena: delivery=grito", seg_elena.delivery == "grito",
           f"obtuvo {seg_elena.delivery}")
-    check("Elena: pace=rápido (0.7)", seg_elena.pace == 0.7,
+    check("Elena: pace=rápido (1.2 velocidad)", seg_elena.pace == 1.2,
           f"obtuvo {seg_elena.pace}")
-    check("Elena: intensity=5", seg_elena.intensity == 5,
+    check("Elena: intensity=5 -> 1.0", seg_elena.intensity == 1.0,
           f"obtuvo {seg_elena.intensity}")
     check("Elena: directed=1", seg_elena.directed == 1,
           f"obtuvo {seg_elena.directed}")
 
+    # Marco: intensidad 4 -> 0.75
+    seg_marco = segs[2]  # —Ordenó Marco.
+    check("Marco: intensity=4 -> 0.75", seg_marco.intensity == 0.75,
+          f"obtuvo {seg_marco.intensity}")
+
     # Caso 2: CSV con personaje que no coincide -> rechazar
     print("\n== Caso 2: CSV con personaje no coincidente ==")
-    csv_path2 = tempfile.mktemp(suffix=".csv")
-    with open(csv_path2, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["escena", "turno", "personaje", "emocion", "volumen", "ritmo", "intensidad"])
-        writer.writerow([1, 1, "PersonajeInexistente", "neutral", "normal", "normal", 1])
+    csv_path2 = csv_temp([
+        [1, 1, "PersonajeInexistente", "neutral", "normal", "normal", 1],
+    ])
 
     aplicadas2, errores2 = apply_direction(book_id, csv_path2, 0)
     check("CSV con personaje no coincidente se rechaza", aplicadas2 == 0,
@@ -207,6 +244,8 @@ def main():
     loop.exec()
 
     segs2 = db2.segments(cid2)
+    check("Caso 4: 3 segmentos de narración", len(segs2) == 3,
+          f"obtuvo {len(segs2)}")
     print(f"  Después de dirigir:")
     for s in segs2:
         print(f"    Seg {s.idx}: \"{s.text[:30]}\" emotion={s.emotion} "
@@ -219,19 +258,13 @@ def main():
     check("Susurró → delivery=susurro", seg_susurro.delivery == "susurro",
           f"obtuvo {seg_susurro.delivery}")
 
-    if len(segs2) > 1:
-        seg_grito = segs2[1]  # Él gritó fuerte.
-        check("Gritó → delivery=grito", seg_grito.delivery == "grito",
-              f"obtuvo {seg_grito.delivery}")
-    else:
-        check("Gritó → delivery=grito", True, "solo hay 1 segmento")
+    seg_grito = segs2[1]  # Él gritó fuerte.
+    check("Gritó → delivery=grito", seg_grito.delivery == "grito",
+          f"obtuvo {seg_grito.delivery}")
 
-    if len(segs2) > 2:
-        seg_orden = segs2[2]  # Él ordenó detenerse.
-        check("Ordenó → delivery=firme", seg_orden.delivery == "firme",
-              f"obtuvo {seg_orden.delivery}")
-    else:
-        check("Ordenó → delivery=firme", True, "solo hay 1 segmento")
+    seg_orden = segs2[2]  # Él ordenó detenerse.
+    check("Ordenó → delivery=firme", seg_orden.delivery == "firme",
+          f"obtuvo {seg_orden.delivery}")
 
     # Limpiar archivos temporales
     for f in [csv_path, csv_path2]:

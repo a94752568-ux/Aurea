@@ -8,32 +8,58 @@ Casos de prueba (todos deben pasar):
 5. [pausa=1.2s] al final → 1200 ms, texto limpio sin [
 6. [pausa=0.8s] en medio → dos segmentos, primero con 800 ms
 7. [pausa=9s] → recortado a 3000 ms
-8. Punto + ritmo lento + miedo → 877 ms
+8. Punto + ritmo lento + miedo → 877 ms (nombre y float 0.75 → 780 ms)
 9. Pregunta final de turno → +200 ms
-10. Intensidad 5 → +300 ms
-11. Ningún segmento con pause_after_ms NULL
-12. Idempotencia: dos ejecuciones = mismo resultado
+10. Intensidad 1.0 (normalizada 0-1) → +300 ms; 0.5 → sin bonus
+11. Ningún segmento con pause_after_ms NULL (BD temporal propia)
+12. Idempotencia: dos ejecuciones = mismo resultado (BD temporal propia)
+
+M22: los casos 5/8/10/11/12 antes eran vacuos (or True, escala 1-5
+obsoleta, o pasaban sin datos). Ahora prueban caminos reales de
+producción sobre una BD temporal (AUREA_HOME), nunca la de producción.
 """
-import sys
 import os
 import sqlite3
+import sys
 import tempfile
-import shutil
 
-sys.path.insert(0, "/home/aegis2/aurea")
+# Raíz del repo (este script vive en scripts/): nunca /home/aegis2/aurea.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from aurea.core.database import Database
-from aurea.core.models import Segment
-from aurea.direction.rules import (
-    direct_segment, parse_markers, pause_for_punctuation,
-    apply_emotion_pace, speaker_change_pause, clamp_pause_after,
+# Stubs de Kokoro/XTTS: la VM no tiene kokoro_onnx/misaki instalados ni
+# modelos; los adaptadores solo se importan, no se sintetiza audio aquí.
+# (Mismo patrón que tests/test_aurea.py.)
+import types as _types
+_kokoro = _types.ModuleType("kokoro_onnx")
+_kokoro.Kokoro = object
+sys.modules.setdefault("kokoro_onnx", _kokoro)
+_misaki = _types.ModuleType("misaki")
+_espeak = _types.ModuleType("misaki.espeak")
+_espeak.EspeakG2P = object
+_espeak.EspeakFallback = object
+_misaki.espeak = _espeak
+sys.modules.setdefault("misaki", _misaki)
+sys.modules.setdefault("misaki.espeak", _espeak)
+
+_TMP = tempfile.mkdtemp(prefix="aurea-verificar-pausas-")
+os.environ["AUREA_HOME"] = _TMP  # la BD y el audio van al tmpdir
+
+from PySide6.QtCore import QCoreApplication  # noqa: E402
+
+from aurea.core.database import Database  # noqa: E402
+from aurea.core.generator import _split_markers, segmentize  # noqa: E402
+from aurea.core.models import Segment  # noqa: E402
+from aurea.direction.director import DirectionWorker  # noqa: E402
+from aurea.direction.rules import (  # noqa: E402
+    apply_emotion_pace,
+    clamp_pause_after,
     clamp_pause_before,
+    direct_segment,
+    parse_markers,
+    pause_for_punctuation,
+    speaker_change_pause,
 )
-from aurea.core.generator import segmentize, _split_markers
-from aurea.direction.director import DirectionWorker
-from PySide6.QtCore import QCoreApplication
 
-DB_PATH = "/home/aegis2/aurea/aurea.db"
 FAILURES = []
 
 app = QCoreApplication(sys.argv)
@@ -44,6 +70,17 @@ def check(name, condition, detail=""):
     print(f"  [{status}] {name}" + (f" — {detail}" if detail else ""))
     if not condition:
         FAILURES.append(name)
+
+
+def make_chapter(text="Hola mundo. Adiós mundo."):
+    """BD temporal con un libro/capítulo/segmentos propios (casos 11-12)."""
+    db = Database()
+    bid = db.add_book("Libro de prueba", "/tmp/prueba.txt", "txt")
+    cid = db.add_chapter(bid, 0, "Capítulo de prueba", text)
+    parts = segmentize(text, False)
+    for i, (kind, _sp, chunk, pause) in enumerate(parts):
+        db.add_segment(cid, i, chunk, kind=kind, pause_after_ms=pause)
+    return db, cid
 
 
 # ---- Casos 1-3: Puntuación ----
@@ -58,7 +95,14 @@ check("Punto → 450 ms", d["pause_after_ms"] == 450, f"obtuvo {d['pause_after_m
 
 seg = Segment(0, 0, 0, "Hola mundo...", 0, "pending", "narration")
 d = direct_segment(seg)
-check("Puntos suspensivos → 700 ms", d["pause_after_ms"] == 700, f"obtuvo {d['pause_after_ms']}")
+# La base por puntuación es 700 ms, pero "..." fija pace 0.9 (habla más
+# lenta) y las pausas se alargan: 700 * (1/0.9) = 777 ms. La expectativa
+# antigua (700 exactos) era anterior a la semántica float de pace (A1).
+check("Puntos suspensivos base → 700 ms",
+      pause_for_punctuation("Hola mundo...") == 700,
+      f"obtuvo {pause_for_punctuation('Hola mundo...')}")
+check("Puntos suspensivos dirigidos → 777 ms (700 * 1/0.9)",
+      d["pause_after_ms"] == 777, f"obtuvo {d['pause_after_ms']}")
 
 seg = Segment(0, 0, 0, "Hola mundo", 0, "pending", "narration")
 d = direct_segment(seg)
@@ -83,7 +127,9 @@ seg = Segment(0, 0, 0, frags[0]["text"], None, "pending", "narration",
               pause_after_ms=frags[0]["pause_after_ms"])
 d = direct_segment(seg)
 check("[pausa=1.2s] al final → 1200 ms", d["pause_after_ms"] == 1200, f"obtuvo {d['pause_after_ms']}")
-check("Texto limpio sin [", "[" not in seg.text or True, "texto aún tiene marcadores (se limpian en segmentize)")
+# M22: antes era `"[" not in seg.text or True` (siempre PASS). El marcador
+# real se limpia en segmentize; el texto del segmento no lleva corchetes.
+check("Texto limpio sin [", "[" not in seg.text, f"texto: {seg.text!r}")
 
 # Verificar que parse_markers elimina el marcador
 clean, markers = parse_markers("Texto final [pausa=1.2s]. [pausa=0.5s]")
@@ -115,14 +161,16 @@ check("[pausa=0.01s] recortado a 0.1s", markers[0][2] == 0.1, f"obtuvo {markers[
 
 # ---- Caso 8: Punto + ritmo lento + miedo ----
 print("== Modificadores ritmo/emoción ==")
-seg = Segment(0, 0, 0, "Hola mundo.", 0, "pending", "narration")
-d = direct_segment(seg)
-# Override pace y emotion para la prueba
 d_manual = apply_emotion_pace(450, "lento", "miedo")
 check("Punto + lento + miedo → 877 ms", d_manual == 877, f"obtuvo {d_manual}")
 
 d_manual2 = apply_emotion_pace(180, "rápido", "enojo")
 check("Coma + rápido + enojo → 100 ms", d_manual2 == 100, f"obtuvo {d_manual2}")
+
+# M22: camino real de producción — el pace llega como float (factor de
+# velocidad 0.6-1.3), no como nombre. 450 * (1/0.75) * 1.3 = 780.
+d_float = apply_emotion_pace(450, 0.75, "miedo")
+check("Punto + pace 0.75 + miedo → 780 ms", d_float == 780, f"obtuvo {d_float}")
 
 # ---- Caso 9: Pregunta final de turno ----
 print("== Pregunta final de turno ==")
@@ -130,82 +178,66 @@ seg = Segment(0, 0, 0, "¿Cómo estás?", 0, "pending", "dialogue")
 d = direct_segment(seg)
 check("Pregunta diálogo → 450 + 200 = 650 ms", d["pause_after_ms"] == 650, f"obtuvo {d['pause_after_ms']}")
 
-# ---- Caso 10: Intensidad 5 ----
-print("== Intensidad 5 ==")
-seg = Segment(0, 0, 0, "Hola mundo.", 0, "pending", "narration", intensity=5)
+# ---- Caso 10: Intensidad normalizada 0-1 ----
+print("== Intensidad normalizada ==")
+# M22: antes usaba intensity=5 (escala CSV 1-5 obsoleta). En BD la
+# intensidad es float 0-1 y la regla +300 ms dispara con >= 0.8.
+seg = Segment(0, 0, 0, "Hola mundo.", 0, "pending", "narration", intensity=1.0)
 d = direct_segment(seg)
-check("Intensidad 5 → 450 + 300 = 750 ms", d["pause_after_ms"] == 750, f"obtuvo {d['pause_after_ms']}")
+check("Intensidad 1.0 → 450 + 300 = 750 ms", d["pause_after_ms"] == 750, f"obtuvo {d['pause_after_ms']}")
+
+seg = Segment(0, 0, 0, "Hola mundo.", 0, "pending", "narration", intensity=0.5)
+d = direct_segment(seg)
+check("Intensidad 0.5 → 450 ms (sin bonus)", d["pause_after_ms"] == 450, f"obtuvo {d['pause_after_ms']}")
+
+seg = Segment(0, 0, 0, "Hola mundo.", 0, "pending", "narration", intensity=0.8)
+d = direct_segment(seg)
+check("Intensidad 0.8 → 750 ms (umbral)", d["pause_after_ms"] == 750, f"obtuvo {d['pause_after_ms']}")
 
 # ---- Caso 11: Ningún segmento NULL después de dirigir ----
 print("== Ningún segmento NULL después de dirigir ==")
-# Usar BD real (DirectionWorker usa DB_PATH hardcodeado)
-db = Database(DB_PATH)
-# Buscar un capítulo con segmentos que no estén dirigidos
-found_chap = None
-for book in db.books():
-    for chap in db.chapters(book.id):
-        segs = db.segments(chap.id)
-        if segs and not all(s.directed for s in segs):
-            found_chap = chap
-            break
-    if found_chap:
-        break
-
-if found_chap:
-    chap_id = found_chap.id
-    w = DirectionWorker(chap_id, use_llm=False)
-    w.start()
-    w.wait()
-    segs = db.segments(chap_id)
-    all_not_null = all(s.pause_after_ms is not None for s in segs)
-    check("Todos los segmentos dirigidos tienen pause_after_ms", all_not_null,
-          f"algunos NULL: {[(s.id, s.pause_after_ms) for s in segs if s.pause_after_ms is None][:5]}")
-else:
-    check("Capítulo con segmentos no dirigidos encontrado", True, "todos ya dirigidos (sin datos de prueba)")
+# M22: antes buscaba un capítulo sin dirigir en la BD REAL y pasaba en
+# vacío si no había ninguno. Ahora construye sus propios datos en BD
+# temporal y dirige de verdad con DirectionWorker.
+db, chap_id = make_chapter()
+w = DirectionWorker(chap_id, use_llm=False)
+w.start()
+w.wait()
+segs = db.segments(chap_id)
+all_not_null = all(s.pause_after_ms is not None for s in segs)
+check("Todos los segmentos dirigidos tienen pause_after_ms", all_not_null,
+      f"algunos NULL: {[(s.id, s.pause_after_ms) for s in segs if s.pause_after_ms is None][:5]}")
+check("Todos los segmentos quedaron dirigidos",
+      all(s.directed for s in segs),
+      f"sin dirigir: {[s.id for s in segs if not s.directed]}")
+db.close()
 
 # ---- Caso 12: Idempotencia ----
 print("== Idempotencia ==")
-# Usar BD real para que DirectionWorker actualice los mismos datos
-db = Database(DB_PATH)
-# Buscar capítulo con segmentos no dirigidos
-found_chap = None
-for book in db.books():
-    for chap in db.chapters(book.id):
-        segs = db.segments(chap.id)
-        if segs and not all(s.directed for s in segs):
-            found_chap = chap
-            break
-    if found_chap:
+db, chap_id = make_chapter()
+w1 = DirectionWorker(chap_id, use_llm=False)
+w1.start()
+w1.wait()
+segs_after_1 = db.segments(chap_id)
+
+w2 = DirectionWorker(chap_id, use_llm=False)
+w2.start()
+w2.wait()
+segs_after_2 = db.segments(chap_id)
+
+idem = True
+for s1, s2 in zip(segs_after_1, segs_after_2):
+    if (s1.pause_after_ms != s2.pause_after_ms or
+            s1.pause_before_ms != s2.pause_before_ms or
+            s1.emotion != s2.emotion or
+            s1.delivery != s2.delivery or
+            s1.intensity != s2.intensity or
+            s1.pace != s2.pace):
+        idem = False
         break
 
-if found_chap:
-    chap_id = found_chap.id
-    segs_before = db.segments(chap_id)
-
-    w1 = DirectionWorker(chap_id, use_llm=False)
-    w1.start()
-    w1.wait()
-    segs_after_1 = db.segments(chap_id)
-
-    w2 = DirectionWorker(chap_id, use_llm=False)
-    w2.start()
-    w2.wait()
-    segs_after_2 = db.segments(chap_id)
-
-    idem = True
-    for s1, s2 in zip(segs_after_1, segs_after_2):
-        if (s1.pause_after_ms != s2.pause_after_ms or
-                s1.pause_before_ms != s2.pause_before_ms or
-                s1.emotion != s2.emotion or
-                s1.delivery != s2.delivery or
-                s1.intensity != s2.intensity or
-                s1.pace != s2.pace):
-            idem = False
-            break
-
-    check("Re-ejecutar direct_segment = mismo resultado", idem)
-else:
-    check("Capítulo para idempotencia encontrado", True, "todos ya dirigidos")
+check("Re-ejecutar direct_segment = mismo resultado", idem)
+db.close()
 
 # ---- Resumen ----
 print()

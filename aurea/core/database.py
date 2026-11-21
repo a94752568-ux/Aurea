@@ -1,9 +1,24 @@
+import os
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 
 from .models import Book, Chapter, Character, Segment
 
-DB_PATH = Path.home() / "aurea" / "aurea.db"
+# Raíz de datos de AUREA. AUREA_HOME permite redirigir BD y audio a un
+# directorio temporal (tests): sin la variable, es ~/aurea como siempre.
+AUREA_HOME = Path(os.environ.get("AUREA_HOME", Path.home() / "aurea"))
+DB_PATH = AUREA_HOME / "aurea.db"
+
+
+def aurea_home() -> Path:
+    """Raíz de datos resuelta EN CADA LLAMADA (no en import).
+
+    El módulo congelaba AUREA_HOME al importar: los tests que fijaban
+    AUREA_HOME después del import seguían escribiendo en ~/aurea.
+    Database.__init__ y el generador usan esta función; en producción
+    (sin la variable) devuelve ~/aurea como siempre."""
+    return Path(os.environ.get("AUREA_HOME", Path.home() / "aurea"))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS books(
@@ -52,11 +67,47 @@ NEW_SEGMENT_COLS = {
 class Database:
     """SQLite: metadatos del proyecto. Los WAV viven fuera de la base."""
 
-    def __init__(self, path=DB_PATH):
+    def __init__(self, path=None):
+        if path is None:
+            # Se resuelve en cada llamada (no en import): los tests pueden
+            # fijar AUREA_HOME antes de crear la BD.
+            path = aurea_home() / "aurea.db"
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(path)
+        # C4: las ON DELETE CASCADE del esquema son inertes sin esto
+        # (SQLite lo trae desactivado por defecto).
+        self.conn.execute("PRAGMA foreign_keys=ON")
+        self._defer_commit = False
         self.conn.executescript(SCHEMA)
         self._migrate()
+
+    def _commit(self):
+        """Commit inmediato, salvo dentro de transaction() (M25)."""
+        if not self._defer_commit:
+            self.conn.commit()
+
+    @contextmanager
+    def transaction(self):
+        """Agrupa varias escrituras en un solo commit (importar un libro
+        con 1300 segmentos era un commit con fsync por segmento)."""
+        prev = self._defer_commit
+        self._defer_commit = True
+        try:
+            yield
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            self._defer_commit = prev
+
+    def close(self):
+        """Cierra la conexión. Llamar en finally de los hilos (M8)."""
+        try:
+            self.conn.commit()
+        except Exception:
+            pass
+        self.conn.close()
 
     def _migrate(self):
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(segments)")}
@@ -76,13 +127,13 @@ class Database:
         if "voice_profile_id" not in char_cols:
             self.conn.execute(
                 "ALTER TABLE characters ADD COLUMN voice_profile_id INTEGER")
-        self.conn.commit()
+        self._commit()
 
     # ---- libros ----
     def add_book(self, title, path, fmt):
         cur = self.conn.execute(
             "INSERT INTO books(title, path, fmt) VALUES (?,?,?)", (title, path, fmt))
-        self.conn.commit()
+        self._commit()
         return cur.lastrowid
 
     def books(self):
@@ -94,7 +145,7 @@ class Database:
         cur = self.conn.execute(
             "INSERT INTO chapters(book_id, idx, title, text) VALUES (?,?,?,?)",
             (book_id, idx, title, text))
-        self.conn.commit()
+        self._commit()
         return cur.lastrowid
 
     def chapters(self, book_id):
@@ -119,7 +170,7 @@ class Database:
             "INSERT INTO segments(chapter_id, idx, text, kind, character_id, "
             "pause_after_ms) VALUES (?,?,?,?,?,?)",
             (chapter_id, idx, text, kind, character_id, pause_after_ms))
-        self.conn.commit()
+        self._commit()
         return Segment(cur.lastrowid, chapter_id, idx, text, None, "pending",
                        kind, character_id, pause_after_ms=pause_after_ms)
 
@@ -133,11 +184,11 @@ class Database:
         self.conn.execute(
             "UPDATE segments SET wav_path=?, status=? WHERE id=?",
             (wav_path, status, seg_id))
-        self.conn.commit()
+        self._commit()
 
     def clear_segments(self, chapter_id):
         self.conn.execute("DELETE FROM segments WHERE chapter_id=?", (chapter_id,))
-        self.conn.commit()
+        self._commit()
 
     def update_direction(self, seg_id, emotion, delivery, intensity, pace,
                          pause_before_ms, pause_after_ms, directed=1):
@@ -146,14 +197,14 @@ class Database:
             "pause_before_ms=?, pause_after_ms=?, directed=? WHERE id=?",
             (emotion, delivery, intensity, pace, pause_before_ms,
              pause_after_ms, directed, seg_id))
-        self.conn.commit()
+        self._commit()
 
     # ---- personajes ----
     def add_character(self, book_id, name, voice, speed, is_narrator=0):
         self.conn.execute(
             "INSERT OR IGNORE INTO characters(book_id, name, voice, speed, is_narrator) "
             "VALUES (?,?,?,?,?)", (book_id, name, voice, speed, is_narrator))
-        self.conn.commit()
+        self._commit()
         row = self.conn.execute(
             "SELECT id FROM characters WHERE book_id=? AND name=?",
             (book_id, name)).fetchone()
@@ -171,7 +222,7 @@ class Database:
             "UPDATE characters SET voice=?, speed=?, engine=?, voice_profile_id=? "
             "WHERE id=?",
             (voice, speed, engine or "kokoro", profile_id, char_id))
-        self.conn.commit()
+        self._commit()
 
     def add_character_with_profile(self, book_id, name, voice, speed,
                                    engine="kokoro", voice_profile_id=None,
@@ -180,7 +231,7 @@ class Database:
             "INSERT OR IGNORE INTO characters(book_id, name, voice, speed, is_narrator, "
             "engine, voice_profile_id) VALUES (?,?,?,?,?,?,?)",
             (book_id, name, voice, speed, is_narrator, engine, voice_profile_id))
-        self.conn.commit()
+        self._commit()
         row = self.conn.execute(
             "SELECT id FROM characters WHERE book_id=? AND name=?",
             (book_id, name)).fetchone()
@@ -193,8 +244,24 @@ class Database:
         from pathlib import Path
         import shutil
         # Borrar archivos de audio asociados
-        out_dir = Path.home() / "aurea" / "output" / f"book_{book_id}"
+        out_dir = Path(os.environ.get("AUREA_HOME", Path.home() / "aurea")) / "output" / f"book_{book_id}"
         if out_dir.exists():
             shutil.rmtree(out_dir, ignore_errors=True)
+        # C4: borrado en cascada explícito, además del PRAGMA foreign_keys=ON
+        # de __init__: sin él, borrar un libro dejaba capítulos, segmentos
+        # y personajes huérfanos (las CASCADE del esquema eran inertes).
+        self.conn.execute(
+            "DELETE FROM segments WHERE chapter_id IN "
+            "(SELECT id FROM chapters WHERE book_id=?)", (book_id,))
+        self.conn.execute("DELETE FROM chapters WHERE book_id=?", (book_id,))
+        self.conn.execute("DELETE FROM characters WHERE book_id=?", (book_id,))
         self.conn.execute("DELETE FROM books WHERE id=?", (book_id,))
-        self.conn.commit()
+        self._commit()
+
+    def book_by_path(self, path):
+        """Devuelve el Book ya importado desde esa ruta, o None (M11:
+        re-importar el mismo archivo no debe duplicar el libro)."""
+        row = self.conn.execute(
+            "SELECT id, title, path, fmt FROM books WHERE path=?",
+            (str(path),)).fetchone()
+        return Book(*row) if row else None

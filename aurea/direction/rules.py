@@ -8,7 +8,16 @@ Vocabularios (Espec 4.1):
     determinación.
   Eje B Volumen (6): susurro, bajo, normal, firme, elevado, grito.
   Eje C Ritmo (5): lento, pausado, normal, rápido, entrecortado.
-  Intensidad: 1–5.
+  Intensidad: 0–1 (0 = mínima, 1 = máxima; el CSV 1–5 se normaliza
+    con (n-1)/4 en scripts/aplicar_direccion.py).
+
+SEMÁNTICA DECIDIDA (2026-11-20, auditoría A1–A3):
+  `pace` en BD = factor de VELOCIDAD float 0.6–1.3 (lento≈0.75,
+  normal=1.0, rápido≈1.2). El generador lo usa como velocidad
+  (speed = vspeed * pace): un "lento" nunca acelera. `intensity`
+  en BD = float 0–1. PACE_MULT (nombres → multiplicador de PAUSA)
+  solo se usa dentro de apply_emotion_pace cuando recibe un nombre;
+  PACE_SPEED convierte nombres de ritmo a factores de velocidad.
 """
 import re
 
@@ -48,13 +57,25 @@ PUNCT_PAUSE = {
     "—": 250,
 }
 
-# Multiplicadores de ritmo (Espec 2.3)
+# Multiplicadores de ritmo (Espec 2.3) — para PAUSAS, cuando el ritmo
+# viene como nombre. Para velocidad, ver PACE_SPEED abajo.
 PACE_MULT = {
     "lento": 1.5,
     "pausado": 1.8,
     "normal": 1.0,
     "rápido": 0.7,
     "entrecortado": 0.8,
+}
+
+# Factores de VELOCIDAD por nombre de ritmo (escala decidida en BD:
+# pace = float 0.6–1.3). "entrecortado" no cambia la velocidad: lo
+# entrecortado son las pausas, no el tempo.
+PACE_SPEED = {
+    "lento": 0.75,
+    "pausado": 0.85,
+    "normal": 1.0,
+    "rápido": 1.2,
+    "entrecortado": 1.0,
 }
 
 # Multiplicadores de emoción (Espec 2.3)
@@ -149,11 +170,19 @@ def pause_for_punctuation(text):
 def apply_emotion_pace(base_ms, pace, emotion):
     """Aplica multiplicadores de ritmo y emoción sobre un valor base.
 
+    `pace` acepta dos formas (A1):
+      - nombre ("lento"...): multiplicador de pausa de PACE_MULT.
+      - factor de velocidad float (0.6–1.3, lo que pasa producción):
+        hablar más lento alarga las pausas, así que el multiplicador
+        de pausa es 1/pace, combinado con el de emoción.
     Orden: primero ritmo, luego emoción. Redondea al entero.
     """
     ms = base_ms
-    if pace in PACE_MULT:
+    if isinstance(pace, str) and pace in PACE_MULT:
         ms = ms * PACE_MULT[pace]
+    elif isinstance(pace, (int, float)):
+        mult = 1.0 / max(0.5, min(float(pace), 1.5))
+        ms = ms * mult
     if emotion in EMOTION_MULT:
         ms = ms * EMOTION_MULT[emotion]
     return int(ms)  # truncamiento al entero, según ejemplos del spec
@@ -224,7 +253,7 @@ def direct_segment(seg, is_first=False, prev_speaker=None):
     else:
         intensity = 0.6
 
-    # --- Pace ---
+    # --- Pace: factor de VELOCIDAD (escala decidida 0.6–1.3) ---
     if delivery == "susurro":
         pace = 0.85
     elif delivery == "grito":
@@ -259,9 +288,11 @@ def direct_segment(seg, is_first=False, prev_speaker=None):
     if not is_explicit and seg.kind == "dialogue" and text.rstrip().endswith("?"):
         pause_after += 200
 
-    # Intensidad 5: +300 ms después (golpe dramático)
-    # Solo si NO es un marcador explícito ni cambio de hablante
-    if not is_explicit and seg.intensity == 5:
+    # Intensidad alta (>= 0.8 en escala 0–1): +300 ms después (golpe
+    # dramático). Antes se comprobaba `== 5` (escala CSV 1–5), que en
+    # producción nunca se cumplía (A2). Solo si NO es un marcador
+    # explícito ni cambio de hablante.
+    if not is_explicit and seg.intensity is not None and seg.intensity >= 0.8:
         pause_after += 300
 
     pause_after = clamp_pause_after(pause_after, explicit=is_explicit)

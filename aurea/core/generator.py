@@ -1,4 +1,5 @@
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -6,7 +7,8 @@ import numpy as np
 import soundfile as sf
 from PySide6.QtCore import QThread, Signal
 
-from .database import Database
+from .audio_processor import AudioProcessor
+from .database import Database, aurea_home
 from .models import Chapter
 from ..casting.cast_manager import CastManager
 from ..casting.detector import analyze, _strip_speech_tag
@@ -114,7 +116,9 @@ def _gain_for(seg):
 
 class ChapterGenerator(QThread):
     progress = Signal(int, str)
-    failed = Signal(str)
+    log = Signal(str)          # M7: el log va por su propia señal; antes
+    failed = Signal(str)       # emitía progress(0, msg) y reiniciaba la barra
+    cancelled = Signal()       # C5: el usuario pidió parar
     finished_ok = Signal(str)
 
     def __init__(self, chapter: Chapter, voice, speed, force=False, parent=None):
@@ -124,12 +128,37 @@ class ChapterGenerator(QThread):
         self.speed = speed
         self.force = force
         self._last_wav = None
+        # C5: cancelación y pausa reales (el bucle las comprueba por segmento).
+        self._cancel_requested = False
+        self._pause_event = threading.Event()  # set = en pausa
+
+    # ---- control real (C5) ----
+    def request_cancel(self):
+        """Pide parar. No bloquea: el bucle lo ve en el siguiente segmento."""
+        self._cancel_requested = True
+        self._pause_event.clear()  # desbloquear si estaba en pausa
+
+    def request_pause(self):
+        self._pause_event.set()
+
+    def request_resume(self):
+        self._pause_event.clear()
+
+    @property
+    def paused(self):
+        return self._pause_event.is_set()
+
+    def _wait_if_paused(self):
+        while self._pause_event.is_set() and not self._cancel_requested:
+            time.sleep(0.1)
 
     def run(self):
+        db = None
+        xtts = None
         try:
             db = Database()
             book_id = self.chapter.book_id
-            out_dir = Path.home() / "aurea" / "output" / f"book_{book_id}"
+            out_dir = aurea_home() / "output" / f"book_{book_id}"
             out_dir.mkdir(parents=True, exist_ok=True)
             wav_path = out_dir / f"cap_{self.chapter.idx:03d}.wav"
 
@@ -143,14 +172,15 @@ class ChapterGenerator(QThread):
             segs = db.segments(self.chapter.id)
             if not segs:
                 parts = segmentize(self.chapter.text, use_cast)
-                for i, (kind, speaker, chunk, pause) in enumerate(parts):
-                    cid = None
-                    if use_cast:
-                        name = speaker if (kind == "dialogue" and speaker) else "Narrador"
-                        cid = cast.character_id(book_id, name)
-                    segs.append(db.add_segment(self.chapter.id, i, chunk,
-                                               kind=kind, character_id=cid,
-                                               pause_after_ms=pause))
+                with db.transaction():
+                    for i, (kind, speaker, chunk, pause) in enumerate(parts):
+                        cid = None
+                        if use_cast:
+                            name = speaker if (kind == "dialogue" and speaker) else "Narrador"
+                            cid = cast.character_id(book_id, name)
+                        segs.append(db.add_segment(self.chapter.id, i, chunk,
+                                                   kind=kind, character_id=cid,
+                                                   pause_after_ms=pause))
 
             vmap, fallback = (cast.voice_map(book_id) if cast
                               else ({}, ("kokoro", self.voice, self.speed)))
@@ -160,14 +190,18 @@ class ChapterGenerator(QThread):
                 total = len(todo)
                 adapter = KokoroAdapter()
                 clone_map = clone_store.clone_sample_map()
-                xtts = None
                 for i, seg in enumerate(todo):
+                    if self._cancel_requested:
+                        break
+                    self._wait_if_paused()
+                    if self._cancel_requested:
+                        break
                     engine, voice, vspeed = vmap.get(seg.character_id, fallback)
                     pace = seg.pace if (seg.directed and seg.pace) else 1.0
                     t0 = time.perf_counter()
                     use_xtts = (engine == "xtts")
                     sample = clone_map.get(seg.character_id) if use_xtts else None
-                    if use_xtts and sample:
+                    if use_xtts and sample and Path(sample).exists():
                         if xtts is None:
                             xtts = XTTSAdapter()
                             xtts.load()
@@ -175,59 +209,80 @@ class ChapterGenerator(QThread):
                             seg.text, speaker_wav=sample, speed=vspeed * pace)
                         voice_tag = "clon"
                     else:
+                        if use_xtts:
+                            # A6: XTTS sin muestra (o muestra borrada) → voz
+                            # narradora con aviso; nunca revienta el capítulo.
+                            self.log.emit(
+                                f"⚠ Seg {seg.idx:04d}: voz clonada sin muestra; "
+                                f"uso narradora {fallback[1]}")
                         samples, sr = adapter.synthesize(
-                            seg.text, voice=voice, speed=vspeed * pace)
-                        voice_tag = voice
+                            seg.text,
+                            voice=(fallback[1] if use_xtts else voice),
+                            speed=vspeed * pace)
+                        voice_tag = voice if not use_xtts else f"{fallback[1]} (fallback)"
                     samples = np.clip(samples * _gain_for(seg), -1.0, 1.0)
                     seg_wav = out_dir / f"cap_{self.chapter.idx:03d}_seg{seg.idx:04d}.wav"
                     adapter.save_wav(seg_wav, samples, sr)
                     db.update_segment(seg.id, str(seg_wav), "done")
+                    # C1: refrescar el objeto en memoria. update_segment solo
+                    # toca la BD; sin esto _concat no veía el WAV en la
+                    # primera generación y se reportaba éxito falso.
+                    seg.wav_path = str(seg_wav)
+                    seg.status = "done"
                     tag = f" · {seg.emotion}/{seg.delivery}" if seg.directed else ""
                     self.progress.emit(
                         int((i + 1) * 100 / total),
                         f"Segmento {i + 1}/{total} voz {voice_tag}{tag} "
                         f"({time.perf_counter() - t0:.1f}s)")
-                    if seg.directed:
-                        seg.display_narration()
-                        log_line = f"✔ {seg.idx + 1:02d} [{seg.kind}]{tag}"
-                        log_line += f" · {seg.emotion}/{seg.delivery} · vel {seg.pace:.2f}"
-                        self.log_line(log_line)
-                    self.worker_log(f"✅ Cap {self.chapter.idx:03d} · Seg {seg.idx:04d} → {seg_wav}")
+                    self.log.emit(f"✅ Cap {self.chapter.idx:03d} · Seg {seg.idx:04d} → {seg_wav}")
                     self._last_wav = str(seg_wav)
-                if xtts is not None:
-                    xtts.release()
 
-            final_wav = self._concat(segs, vmap, fallback, wav_path)
-            if final_wav:
+            if self._cancel_requested:
+                self.cancelled.emit()
+                return
+
+            final_wav = self._concat(segs, vmap, fallback, wav_path, log=self.log.emit)
+            if final_wav and Path(final_wav).exists():
                 self._last_wav = str(final_wav)
-                target = Path.home() / "aurea" / "output" / "latest.wav"
+                target = aurea_home() / "output" / "latest.wav"
                 try:
                     import shutil
                     shutil.copy2(str(final_wav), target)
                 except Exception:
                     pass
-            self.finished_ok.emit(f"✔ Cap {self.chapter.idx:03d} listo → {self._last_wav}")
+                self.finished_ok.emit(f"✔ Cap {self.chapter.idx:03d} listo → {self._last_wav}")
+            else:
+                # C1: sin WAV final no hay éxito (antes se emitía
+                # finished_ok con la ruta del último segmento).
+                self.failed.emit(
+                    f"No se pudo producir el WAV final del capítulo {self.chapter.idx:03d}.")
 
         except Exception as e:
             self.failed.emit(str(e))
-
-    def log_line(self, msg):
-        self.progress.emit(0, msg)
-
-    def worker_log(self, msg):
-        self.progress.emit(0, msg)
+        finally:
+            # M8: liberar XTTS (~4.4 GB en RAM) y cerrar la conexión del
+            # hilo aunque haya una excepción a mitad de generación.
+            if xtts is not None:
+                try:
+                    xtts.release()
+                except Exception:
+                    pass
+            if db is not None:
+                try:
+                    db.close()
+                except Exception:
+                    pass
 
     @staticmethod
-    def _concat(segs, vmap, fallback, wav_path):
+    def _concat(segs, vmap, fallback, wav_path, log=None):
         clips, sr = [], 24000
         ordered = [s for s in segs if s.wav_path and Path(s.wav_path).exists()]
         if not ordered:
             return None
 
-        for s in ordered:
-            if s.text and "[" in s.text:
-                raise ValueError(
-                    f"Segmento {s.idx} contiene marcador sin eliminar: {s.text[:60]}...")
+        # A5: ya no se aborta el capítulo por un '[' en el texto. Los
+        # marcadores [pausa=Xs] se eliminan en segmentize; cualquier '['
+        # restante es contenido legítimo (p. ej. "[risas]").
 
         first = ordered[0]
         if first.directed and first.pause_before_ms is not None:
@@ -249,6 +304,13 @@ class ChapterGenerator(QThread):
                 clips.append(clip)
 
         audio = np.concatenate(clips) if len(clips) > 1 else clips[0]
+        # A9: procesado master (RMS/compresión/limitador/graves) sobre el
+        # WAV final. Un fallo de procesado NUNCA mata el capítulo.
+        try:
+            audio = AudioProcessor(sr=sr).process_master(audio, sr=sr)
+        except Exception as e:
+            if log is not None:
+                log(f"⚠ process_master falló ({e}); se guarda el audio sin procesar")
         Path(wav_path).parent.mkdir(parents=True, exist_ok=True)
-        sf.write(str(wav_path), audio, sr)
+        sf.write(str(wav_path), audio, sr, subtype="PCM_16")  # A7
         return wav_path

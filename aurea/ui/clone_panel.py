@@ -11,8 +11,8 @@ from PySide6.QtWidgets import (
 from ..core.database import Database
 from ..voice import sample_prep, clone_store
 
-# Voces de Kokoro disponibles (sin em_alex que es del narrador)
-KOKORO_VOICES = ["em_alex", "ef_dora", "em_santa"]
+# Voces de Kokoro asignables (em_alex es la del narrador; no se ofrece aquí)
+KOKORO_VOICES = ["ef_dora", "em_santa"]
 
 
 class ClonePanel(QWidget):
@@ -36,7 +36,7 @@ class ClonePanel(QWidget):
         name_lay.addWidget(self.name_edit)
         import_lay.addLayout(name_lay)
 
-        self.import_btn = QPushButton("🎙️ Seleccionar archivo de audio")
+        self.import_btn = QPushButton("▸ Seleccionar archivo de audio")
         self.import_btn.clicked.connect(self.import_sample)
         import_lay.addWidget(self.import_btn)
 
@@ -83,11 +83,11 @@ class ClonePanel(QWidget):
         assign_lay.addLayout(self.kokoro_lay)
 
         btn_lay = QHBoxLayout()
-        self.btn_assign = QPushButton("✔ Asignar voz seleccionada")
+        self.btn_assign = QPushButton("✓ Asignar voz seleccionada")
         self.btn_assign.clicked.connect(self.assign)
         btn_lay.addWidget(self.btn_assign)
 
-        self.btn_delete = QPushButton("🗑️ Eliminar perfil seleccionado")
+        self.btn_delete = QPushButton("✕ Eliminar perfil seleccionado")
         self.btn_delete.clicked.connect(self.delete)
         btn_lay.addWidget(self.btn_delete)
         assign_lay.addLayout(btn_lay)
@@ -149,7 +149,7 @@ class ClonePanel(QWidget):
         quality_info = (f"✓ Perfil '{base_name}' creado: "
                         f"{rep['duration']}s, {rep['verdict']}")
         if rep.get("problems"):
-            quality_info += f"\n⚠ {', '.join(rep['problems'])}"
+            quality_info += f"\n! {', '.join(rep['problems'])}"
         self.quality_label.setText(quality_info)
         self.name_edit.clear()
         self.refresh()
@@ -164,7 +164,9 @@ class ClonePanel(QWidget):
         engine = self.engine_combo.currentText()
         if engine == "kokoro":
             voice = self.kokoro_combo.currentText()
-            clone_store.assign_character(cid, "kokoro", None)
+            # C3: guardar la voz elegida (antes solo se tocaba engine y
+            # el mensaje mentía: la BD conservaba la voz anterior).
+            clone_store.assign_character(cid, "kokoro", None, voice=voice)
             QMessageBox.information(self, "Listo",
                                     f"Voz Kokoro '{voice}' asignada al personaje.")
         else:
@@ -176,7 +178,9 @@ class ClonePanel(QWidget):
             profiles = clone_store.list_profiles()
             pid = profiles[row]["id"]
             prof_name = profiles[row]["name"]
-            clone_store.assign_character(cid, prof_name, "xtts", pid)
+            # C2: la llamada llevaba 4 argumentos (nombre incluido) a una
+            # función de 3 parámetros → TypeError siempre.
+            clone_store.assign_character(cid, "xtts", pid, voice=prof_name)
             QMessageBox.information(self, "Listo",
                                     f"Voz clonada '{prof_name}' asignada al personaje.")
         self.refresh()
@@ -187,5 +191,14 @@ class ClonePanel(QWidget):
         if row < 0:
             return
         profiles = clone_store.list_profiles()
-        clone_store.delete_profile(profiles[row]["id"])
+        prof = profiles[row]
+        # B12: borrar un perfil borra su muestra del disco de inmediato;
+        # pedir confirmación antes.
+        reply = QMessageBox.question(
+            self, "Eliminar perfil",
+            f"¿Eliminar el perfil '{prof['name']}' y su muestra de audio?",
+            QMessageBox.Yes | QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+        clone_store.delete_profile(prof["id"])
         self.refresh()

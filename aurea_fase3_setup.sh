@@ -1,4 +1,26 @@
 #!/usr/bin/env bash
+# --- A11: escritura segura (no revierte codigo existente) ---
+# Sin --force, un archivo destino que ya existe NO se sobrescribe: se
+# avisa y se conserva. Con --force se hace backup con timestamp y se
+# reescribe. Una instalacion limpia escribe todo con normalidad.
+AUREA_FORCE=0
+if [ "${1:-}" = "--force" ]; then AUREA_FORCE=1; fi
+write_once() {
+  local dest="$1"
+  if [ -e "$dest" ] && [ "$AUREA_FORCE" != "1" ]; then
+    echo "AVISO: $dest ya existe; no se sobrescribe (usa --force para reescribir con backup)" >&2
+    cat > /dev/null
+    return 0
+  fi
+  if [ -e "$dest" ]; then
+    local bak="$dest.bak.$(date +%Y%m%d-%H%M%S)"
+    cp "$dest" "$bak"
+    echo "Backup: $dest -> $bak" >&2
+  fi
+  mkdir -p "$(dirname "$dest")"
+  cat > "$dest"
+}
+# --- fin A11 ---
 # =============================================================
 #  AUREA Audiobook Studio · Fase 3 — Reparto dramatizado
 #  Protocolo Nova-Aegis
@@ -41,7 +63,7 @@ mkdir -p "$AUREA/aurea/casting"
 : > "$AUREA/aurea/casting/__init__.py"
 
 # ---------------- core/models.py (añade Character) ----------------
-cat > "$AUREA/aurea/core/models.py" <<'EOF'
+write_once "$AUREA/aurea/core/models.py" <<'EOF'
 from dataclasses import dataclass
 
 
@@ -85,7 +107,7 @@ class Character:
 EOF
 
 # ---------------- core/database.py (con reparto y migración) ----------------
-cat > "$AUREA/aurea/core/database.py" <<'EOF'
+write_once "$AUREA/aurea/core/database.py" <<'EOF'
 import sqlite3
 from pathlib import Path
 
@@ -228,7 +250,7 @@ class Database:
 EOF
 
 # ---------------- casting/detector.py ----------------
-cat > "$AUREA/aurea/casting/detector.py" <<'EOF'
+write_once "$AUREA/aurea/casting/detector.py" <<'EOF'
 """Detector de diálogos y personajes por reglas (Fase 3).
 El análisis emocional fino llegará con el Director Narrativo (Fase 4)."""
 import re
@@ -305,7 +327,7 @@ def detect_characters(texts, max_chars=12, min_score=2.0):
 EOF
 
 # ---------------- casting/cast_manager.py ----------------
-cat > "$AUREA/aurea/casting/cast_manager.py" <<'EOF'
+write_once "$AUREA/aurea/casting/cast_manager.py" <<'EOF'
 """Gestión del reparto: perfiles vocales persistentes por libro."""
 from ..core.database import Database
 
@@ -353,7 +375,7 @@ class CastManager:
 EOF
 
 # ---------------- core/generator.py (con reparto) ----------------
-cat > "$AUREA/aurea/core/generator.py" <<'EOF'
+write_once "$AUREA/aurea/core/generator.py" <<'EOF'
 import re
 import time
 from pathlib import Path
@@ -486,7 +508,7 @@ class ChapterGenerator(QThread):
 EOF
 
 # ---------------- ui/main_window.py (panel de reparto) ----------------
-cat > "$AUREA/aurea/ui/main_window.py" <<'EOF'
+write_once "$AUREA/aurea/ui/main_window.py" <<'EOF'
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl

@@ -1,4 +1,26 @@
 #!/usr/bin/env bash
+# --- A11: escritura segura (no revierte codigo existente) ---
+# Sin --force, un archivo destino que ya existe NO se sobrescribe: se
+# avisa y se conserva. Con --force se hace backup con timestamp y se
+# reescribe. Una instalacion limpia escribe todo con normalidad.
+AUREA_FORCE=0
+if [ "${1:-}" = "--force" ]; then AUREA_FORCE=1; fi
+write_once() {
+  local dest="$1"
+  if [ -e "$dest" ] && [ "$AUREA_FORCE" != "1" ]; then
+    echo "AVISO: $dest ya existe; no se sobrescribe (usa --force para reescribir con backup)" >&2
+    cat > /dev/null
+    return 0
+  fi
+  if [ -e "$dest" ]; then
+    local bak="$dest.bak.$(date +%Y%m%d-%H%M%S)"
+    cp "$dest" "$bak"
+    echo "Backup: $dest -> $bak" >&2
+  fi
+  mkdir -p "$(dirname "$dest")"
+  cat > "$dest"
+}
+# --- fin A11 ---
 # =============================================================
 #  AUREA Audiobook Studio · Fase 2 — Núcleo funcional
 #  Protocolo Nova-Aegis
@@ -34,12 +56,12 @@ mkdir -p "$AUREA/aurea/core" "$AUREA/aurea/ingestion" "$AUREA/aurea/tts" "$AUREA
 mkdir -p "$AUREA/books" "$AUREA/output"
 
 # ---------------- Paquete ----------------
-cat > "$AUREA/aurea/__init__.py" <<'EOF'
+write_once "$AUREA/aurea/__init__.py" <<'EOF'
 __version__ = "0.2.0-fase2"
 EOF
 
 # ---------------- core/models.py ----------------
-cat > "$AUREA/aurea/core/models.py" <<'EOF'
+write_once "$AUREA/aurea/core/models.py" <<'EOF'
 from dataclasses import dataclass
 
 
@@ -71,7 +93,7 @@ class Segment:
 EOF
 
 # ---------------- core/database.py ----------------
-cat > "$AUREA/aurea/core/database.py" <<'EOF'
+write_once "$AUREA/aurea/core/database.py" <<'EOF'
 import sqlite3
 from pathlib import Path
 
@@ -169,7 +191,7 @@ class Database:
 EOF
 
 # ---------------- ingestion/base.py ----------------
-cat > "$AUREA/aurea/ingestion/base.py" <<'EOF'
+write_once "$AUREA/aurea/ingestion/base.py" <<'EOF'
 from abc import ABC, abstractmethod
 
 
@@ -182,7 +204,7 @@ class BookReader(ABC):
 EOF
 
 # ---------------- ingestion/text_reader.py ----------------
-cat > "$AUREA/aurea/ingestion/text_reader.py" <<'EOF'
+write_once "$AUREA/aurea/ingestion/text_reader.py" <<'EOF'
 import re
 from pathlib import Path
 
@@ -222,7 +244,7 @@ class TextReader(BookReader):
 EOF
 
 # ---------------- ingestion/epub_reader.py ----------------
-cat > "$AUREA/aurea/ingestion/epub_reader.py" <<'EOF'
+write_once "$AUREA/aurea/ingestion/epub_reader.py" <<'EOF'
 import re
 from html.parser import HTMLParser
 from pathlib import Path
@@ -270,7 +292,7 @@ class EpubReader(BookReader):
 EOF
 
 # ---------------- ingestion/pdf_reader.py ----------------
-cat > "$AUREA/aurea/ingestion/pdf_reader.py" <<'EOF'
+write_once "$AUREA/aurea/ingestion/pdf_reader.py" <<'EOF'
 from pathlib import Path
 
 from .base import BookReader
@@ -297,7 +319,7 @@ class PdfBookReader(BookReader):
 EOF
 
 # ---------------- ingestion/importer.py ----------------
-cat > "$AUREA/aurea/ingestion/importer.py" <<'EOF'
+write_once "$AUREA/aurea/ingestion/importer.py" <<'EOF'
 from pathlib import Path
 
 from .epub_reader import EpubReader
@@ -320,7 +342,7 @@ def import_book(path: str):
 EOF
 
 # ---------------- tts/kokoro_adapter.py ----------------
-cat > "$AUREA/aurea/tts/kokoro_adapter.py" <<'EOF'
+write_once "$AUREA/aurea/tts/kokoro_adapter.py" <<'EOF'
 import gc
 import threading
 from pathlib import Path
@@ -384,7 +406,7 @@ class KokoroAdapter:
 EOF
 
 # ---------------- core/generator.py ----------------
-cat > "$AUREA/aurea/core/generator.py" <<'EOF'
+write_once "$AUREA/aurea/core/generator.py" <<'EOF'
 import re
 import time
 from pathlib import Path
@@ -484,7 +506,7 @@ class ChapterGenerator(QThread):
 EOF
 
 # ---------------- ui/main_window.py ----------------
-cat > "$AUREA/aurea/ui/main_window.py" <<'EOF'
+write_once "$AUREA/aurea/ui/main_window.py" <<'EOF'
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl
@@ -704,7 +726,7 @@ for pkg in core ingestion tts ui; do
 done
 
 # ---------------- main.py ----------------
-cat > "$AUREA/aurea/main.py" <<'EOF'
+write_once "$AUREA/aurea/main.py" <<'EOF'
 import sys
 
 from PySide6.QtWidgets import QApplication
@@ -724,7 +746,7 @@ if __name__ == "__main__":
 EOF
 
 # ---------------- requirements y README ----------------
-cat > "$AUREA/requirements-fase2.txt" <<'EOF'
+write_once "$AUREA/requirements-fase2.txt" <<'EOF'
 PySide6>=6.6
 pypdf>=4.0
 EbookLib>=0.18
@@ -735,7 +757,7 @@ espeakng-loader
 numpy
 EOF
 
-cat > "$AUREA/README.md" <<'EOF'
+write_once "$AUREA/README.md" <<'EOF'
 # AUREA Audiobook Studio
 
 Estudio local de audiolibros dramatizados. 100% offline tras la instalación.
