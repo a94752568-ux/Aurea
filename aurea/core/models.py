@@ -16,6 +16,9 @@ class Chapter:
     idx: int
     title: str
     text: str
+    # v0.7.0: ambiente sonoro del capítulo ('none' = sin ambiente).
+    ambience: str = "none"
+    bed_level: float = 0.25
 
 
 @dataclass
@@ -63,3 +66,8 @@ class Character:
     is_narrator: int
     engine: str = "kokoro"
     voice_profile_id: int | None = None
+    # v0.7.0: género inferido ('masculino'/'femenino'/'desconocido');
+    # gender_manual=1 si Alberto lo corrigió a mano (entonces el
+    # auto-casting nunca lo vuelve a tocar).
+    gender: str = "desconocido"
+    gender_manual: int = 0

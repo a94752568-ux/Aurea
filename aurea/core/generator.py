@@ -8,6 +8,7 @@ import soundfile as sf
 from PySide6.QtCore import QThread, Signal
 
 from .audio_processor import AudioProcessor
+from .ambience import mix_chapter
 from .database import Database, aurea_home
 from .models import Chapter
 from ..casting.cast_manager import CastManager
@@ -121,12 +122,17 @@ class ChapterGenerator(QThread):
     cancelled = Signal()       # C5: el usuario pidió parar
     finished_ok = Signal(str)
 
-    def __init__(self, chapter: Chapter, voice, speed, force=False, parent=None):
+    def __init__(self, chapter: Chapter, voice, speed, force=False, parent=None,
+                 ambience=None, bed_level=0.25):
         super().__init__(parent)
         self.chapter = chapter
         self.voice = voice
         self.speed = speed
         self.force = force
+        # v0.7.0: ambiente sonoro del capítulo ('none' = sin ambiente).
+        # Si no se pasa, se lee del capítulo (BD).
+        self.ambience = ambience
+        self.bed_level = bed_level
         self._last_wav = None
         # C5: cancelación y pausa reales (el bucle las comprueba por segmento).
         self._cancel_requested = False
@@ -241,7 +247,16 @@ class ChapterGenerator(QThread):
                 self.cancelled.emit()
                 return
 
-            final_wav = self._concat(segs, vmap, fallback, wav_path, log=self.log.emit)
+            # v0.7.0: ambiente del capítulo (parámetro > BD).
+            ambience = self.ambience
+            if ambience is None:
+                ambience = getattr(self.chapter, "ambience", "none") or "none"
+            bed_level = self.bed_level
+            if self.ambience is None:
+                bed_level = getattr(self.chapter, "bed_level", 0.25) or 0.25
+            final_wav = self._concat(segs, vmap, fallback, wav_path,
+                                     log=self.log.emit, ambience=ambience,
+                                     bed_level=bed_level)
             if final_wav and Path(final_wav).exists():
                 self._last_wav = str(final_wav)
                 target = aurea_home() / "output" / "latest.wav"
@@ -274,7 +289,8 @@ class ChapterGenerator(QThread):
                     pass
 
     @staticmethod
-    def _concat(segs, vmap, fallback, wav_path, log=None):
+    def _concat(segs, vmap, fallback, wav_path, log=None,
+                ambience="none", bed_level=0.25):
         clips, sr = [], 24000
         ordered = [s for s in segs if s.wav_path and Path(s.wav_path).exists()]
         if not ordered:
@@ -304,6 +320,17 @@ class ChapterGenerator(QThread):
                 clips.append(clip)
 
         audio = np.concatenate(clips) if len(clips) > 1 else clips[0]
+        # v0.7.0: mezcla de ambiente con ducking ANTES del master
+        # (el master normaliza el conjunto y conserva la relación
+        # voz/cama). Un fallo de mezcla NUNCA mata el capítulo.
+        if ambience and ambience != "none":
+            try:
+                audio = mix_chapter(audio, ambience, sr, bed_level=bed_level)
+                if log is not None:
+                    log(f"◆ Ambiente «{ambience}» mezclado (cama {bed_level:.2f})")
+            except Exception as e:
+                if log is not None:
+                    log(f"⚠ mezcla de ambiente falló ({e}); se guarda sin cama")
         # A9: procesado master (RMS/compresión/limitador/graves) sobre el
         # WAV final. Un fallo de procesado NUNCA mata el capítulo.
         try:

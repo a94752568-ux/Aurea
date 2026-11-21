@@ -139,6 +139,26 @@ class Database:
             "psm INTEGER, columns INTEGER NOT NULL DEFAULT 1, "
             "needs_review INTEGER NOT NULL DEFAULT 0, "
             "PRIMARY KEY(book_id, page_no))")
+        # Migración v0.7.0 (reparto inteligente + ambientes):
+        # - characters.gender / gender_manual (género inferido; 1 si
+        #   Alberto lo corrigió a mano y no debe re-inferirse).
+        # - chapters.ambience / bed_level (ambiente sonoro por capítulo).
+        if "gender" not in char_cols:
+            self.conn.execute(
+                "ALTER TABLE characters ADD COLUMN gender TEXT "
+                "DEFAULT 'desconocido'")
+        if "gender_manual" not in char_cols:
+            self.conn.execute(
+                "ALTER TABLE characters ADD COLUMN gender_manual "
+                "INTEGER NOT NULL DEFAULT 0")
+        chap_cols = {r[1] for r in self.conn.execute("PRAGMA table_info(chapters)")}
+        if "ambience" not in chap_cols:
+            self.conn.execute(
+                "ALTER TABLE chapters ADD COLUMN ambience TEXT DEFAULT 'none'")
+        if "bed_level" not in chap_cols:
+            self.conn.execute(
+                "ALTER TABLE chapters ADD COLUMN bed_level REAL "
+                "NOT NULL DEFAULT 0.25")
         self._commit()
 
     # ---- páginas OCR (v0.6.0) ----
@@ -187,13 +207,14 @@ class Database:
 
     def chapters(self, book_id):
         rows = self.conn.execute(
-            "SELECT id, book_id, idx, title, text FROM chapters "
-            "WHERE book_id=? ORDER BY idx", (book_id,))
+            "SELECT id, book_id, idx, title, text, ambience, bed_level "
+            "FROM chapters WHERE book_id=? ORDER BY idx", (book_id,))
         return [Chapter(*r) for r in rows]
 
     def chapter(self, chapter_id):
         row = self.conn.execute(
-            "SELECT id, book_id, idx, title, text FROM chapters WHERE id=?",
+            "SELECT id, book_id, idx, title, text, ambience, bed_level "
+            "FROM chapters WHERE id=?",
             (chapter_id,)).fetchone()
         return Chapter(*row) if row else None
 
@@ -237,10 +258,12 @@ class Database:
         self._commit()
 
     # ---- personajes ----
-    def add_character(self, book_id, name, voice, speed, is_narrator=0):
+    def add_character(self, book_id, name, voice, speed, is_narrator=0,
+                      gender="desconocido", gender_manual=0):
         self.conn.execute(
-            "INSERT OR IGNORE INTO characters(book_id, name, voice, speed, is_narrator) "
-            "VALUES (?,?,?,?,?)", (book_id, name, voice, speed, is_narrator))
+            "INSERT OR IGNORE INTO characters(book_id, name, voice, speed, "
+            "is_narrator, gender, gender_manual) VALUES (?,?,?,?,?,?,?)",
+            (book_id, name, voice, speed, is_narrator, gender, gender_manual))
         self._commit()
         row = self.conn.execute(
             "SELECT id FROM characters WHERE book_id=? AND name=?",
@@ -249,10 +272,34 @@ class Database:
 
     def characters(self, book_id):
         rows = self.conn.execute(
-            "SELECT id, book_id, name, voice, speed, is_narrator, engine, voice_profile_id "
+            "SELECT id, book_id, name, voice, speed, is_narrator, engine, "
+            "voice_profile_id, gender, gender_manual "
             "FROM characters WHERE book_id=? ORDER BY is_narrator DESC, name",
             (book_id,))
         return [Character(*r) for r in rows]
+
+    def update_gender(self, char_id, gender):
+        """Corrección manual de género (v0.7.0): marca gender_manual=1
+        para que el auto-casting no vuelva a inferirlo. La voz NO se
+        toca aquí: corregir el género conserva la voz asignada."""
+        self.conn.execute(
+            "UPDATE characters SET gender=?, gender_manual=1 WHERE id=?",
+            (gender, char_id))
+        self._commit()
+
+    def set_character_gender(self, char_id, gender, manual=0):
+        """Guarda el género inferido (manual=0) o corregido (manual=1)."""
+        self.conn.execute(
+            "UPDATE characters SET gender=?, gender_manual=? WHERE id=?",
+            (gender, int(manual), char_id))
+        self._commit()
+
+    def set_chapter_ambience(self, chapter_id, ambience, bed_level=0.25):
+        """Ambiente sonoro del capítulo (v0.7.0)."""
+        self.conn.execute(
+            "UPDATE chapters SET ambience=?, bed_level=? WHERE id=?",
+            (ambience, float(bed_level), chapter_id))
+        self._commit()
 
     def update_character(self, char_id, voice, speed, engine=None, profile_id=None):
         self.conn.execute(
@@ -263,11 +310,13 @@ class Database:
 
     def add_character_with_profile(self, book_id, name, voice, speed,
                                    engine="kokoro", voice_profile_id=None,
-                                   is_narrator=0):
+                                   is_narrator=0, gender="desconocido",
+                                   gender_manual=0):
         self.conn.execute(
             "INSERT OR IGNORE INTO characters(book_id, name, voice, speed, is_narrator, "
-            "engine, voice_profile_id) VALUES (?,?,?,?,?,?,?)",
-            (book_id, name, voice, speed, is_narrator, engine, voice_profile_id))
+            "engine, voice_profile_id, gender, gender_manual) VALUES (?,?,?,?,?,?,?,?,?)",
+            (book_id, name, voice, speed, is_narrator, engine, voice_profile_id,
+             gender, gender_manual))
         self._commit()
         row = self.conn.execute(
             "SELECT id FROM characters WHERE book_id=? AND name=?",

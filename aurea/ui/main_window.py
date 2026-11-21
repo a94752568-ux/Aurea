@@ -47,6 +47,12 @@ from ..ui.theme import (
 
 from ..casting.cast_manager import CastManager
 from ..casting.detector import detect_characters
+from ..casting.gender import DESCONOCIDO, FEMENINO, GENDER_LABEL, MASCULINO
+from ..core.ambience import (
+    AMBIENCES,
+    DEFAULT_BED_LEVEL,
+    RECOMMENDED_AMBIENCE,
+)
 from ..core.database import Database, aurea_home
 from ..core.generator import ChapterGenerator, segmentize
 from ..direction.director import DirectionWorker
@@ -57,6 +63,7 @@ from ..ingestion.ocr_reader import write_ocr_report
 from ..ingestion.pdf_reader import PdfBookReader
 from ..voice import clone_store
 from .clone_panel import ClonePanel
+from .gender_dialog import GenderDialog
 from .ocr_dialog import OcrOptionsDialog
 
 # Glifos de la barra lateral: solo caracteres presentes en DejaVu Sans Mono
@@ -487,6 +494,41 @@ class MainWindow(QFrame):
             # M5: al cambiar de capítulo, refrescar sus segmentos (antes
             # la lista seguía mostrando los del capítulo anterior).
             self._refresh_segments_for_current()
+            # v0.7.0: cargar el ambiente guardado de este capítulo.
+            self._load_ambience_controls()
+
+    def _load_ambience_controls(self):
+        """Pone el combo y el nivel de cama según el capítulo actual."""
+        if not hasattr(self, "amb_combo"):
+            return
+        cid = self._current_chapter_id
+        amb, level = "none", DEFAULT_BED_LEVEL
+        if cid:
+            ch = self.db.chapter(cid)
+            if ch:
+                amb = getattr(ch, "ambience", "none") or "none"
+                level = getattr(ch, "bed_level", DEFAULT_BED_LEVEL) or DEFAULT_BED_LEVEL
+        self.amb_combo.blockSignals(True)
+        self.amb_combo.setCurrentIndex(
+            max(0, list(AMBIENCES).index(amb)) if amb in AMBIENCES else 0)
+        self.amb_combo.blockSignals(False)
+        self.bed_spin.blockSignals(True)
+        self.bed_spin.setValue(float(level))
+        self.bed_spin.blockSignals(False)
+
+    def _save_ambience_controls(self):
+        """Guarda el ambiente elegido para el capítulo actual."""
+        if not hasattr(self, "amb_combo") or not self._current_chapter_id:
+            return
+        amb = self.amb_combo.currentData() or "none"
+        self.db.set_chapter_ambience(
+            self._current_chapter_id, amb, self.bed_spin.value())
+
+    def _on_ambience_changed(self, _index):
+        self._save_ambience_controls()
+
+    def _on_bed_level_changed(self, _value):
+        self._save_ambience_controls()
 
     # ================================================================
     # PÁGINA 1 · ESTUDIO
@@ -520,6 +562,30 @@ class MainWindow(QFrame):
         btn_stop.clicked.connect(self._stop_generation)
         btns.addWidget(btn_stop)
         caps.body.addLayout(btns)
+
+        # v0.7.0: ambiente sonoro por capítulo (cama + ducking).
+        amb_row = QHBoxLayout()
+        amb_row.addWidget(QLabel("Ambiente:"))
+        self.amb_combo = QComboBox()
+        for key, label in AMBIENCES.items():
+            text = label
+            if key == RECOMMENDED_AMBIENCE:
+                text += " — recomendado para el Popol Vuh"
+            self.amb_combo.addItem(text, key)
+        self.amb_combo.setToolTip(
+            "Cama de sonido sintetizado bajo la narración (100% local). "
+            "Baja sola mientras hay voz y sube en las pausas (ducking).")
+        self.amb_combo.currentIndexChanged.connect(self._on_ambience_changed)
+        amb_row.addWidget(self.amb_combo, 1)
+        amb_row.addWidget(QLabel("Cama:"))
+        self.bed_spin = QDoubleSpinBox()
+        self.bed_spin.setRange(0.05, 0.60)
+        self.bed_spin.setSingleStep(0.05)
+        self.bed_spin.setValue(DEFAULT_BED_LEVEL)
+        self.bed_spin.setToolTip("Volumen de la cama en los silencios (0.25 por defecto)")
+        self.bed_spin.valueChanged.connect(self._on_bed_level_changed)
+        amb_row.addWidget(self.bed_spin)
+        caps.body.addLayout(amb_row)
         lay.addWidget(caps, 1)
 
         det = HudPanel("SEGMENTOS DEL CAPÍTULO")
@@ -827,6 +893,9 @@ class MainWindow(QFrame):
         btn_apply = self._btn("✔ Aplicar voces", "ghost", "Ir a la página de voz clonada para asignar voces")
         btn_apply.clicked.connect(self._apply_cast_voices)
         btns.addWidget(btn_apply)
+        btn_gender = self._btn("✎ Corregir género", "ghost", "Corregir el género inferido de cada personaje (la voz no cambia)")
+        btn_gender.clicked.connect(self._correct_gender)
+        btns.addWidget(btn_gender)
         btns.addStretch(1)
         panel.body.addLayout(btns)
 
@@ -845,20 +914,41 @@ class MainWindow(QFrame):
         self.cast_list.clear()
         if not self._current_book_id:
             return
-        chars = self.db.characters(self._current_book_id)
-
-        for ch in chars:
-            tag = " ● narrador" if ch.is_narrator else ""
-            engine = getattr(ch, 'engine', 'kokoro') or 'kokoro'
-            voice_label = ch.voice
-            if engine == "xtts" and ch.voice_profile_id:
-                prof = clone_store.get_profile(ch.voice_profile_id)
-                if prof:
-                    voice_label = f"CLON: {prof['name']}"
+        # v0.7.0: género inferido [M/F/?] + género de la voz asignada.
+        info = CastManager(self.db).cast_info(self._current_book_id)
+        for ch in info:
+            tag = " ● narrador" if ch["is_narrator"] else ""
+            if ch["gender"] == DESCONOCIDO:
+                tag += " ◆ sin confirmar"
+            elif ch["mismatch"]:
+                tag += " ◆ voz no encaja"
+            voice_label = ch["voice"]
+            if ch["engine"] == "xtts":
+                # En XTTS la columna voice guarda el nombre del perfil.
+                voice_label = f"CLON: {ch['voice']}"
             item = QListWidgetItem(
-                f"{ch.name} → {voice_label}{tag}")
-            item.setData(Qt.UserRole, ch.id)
+                f"{ch['name']} [{GENDER_LABEL[ch['gender']]}] → "
+                f"{voice_label} ({GENDER_LABEL[ch['voice_gender']]}){tag}")
+            item.setData(Qt.UserRole, ch["id"])
             self.cast_list.addItem(item)
+
+    def _correct_gender(self):
+        """Abre el diálogo de corrección de género del reparto."""
+        if not self._current_book_id:
+            QMessageBox.information(self, "AUREA", "Selecciona un libro primero.")
+            return
+        info = CastManager(self.db).cast_info(self._current_book_id)
+        if not info:
+            QMessageBox.information(self, "AUREA", "No hay reparto que corregir.")
+            return
+        dlg = GenderDialog(self, info)
+        if dlg.exec():
+            mgr = CastManager(self.db)
+            for cid, gender in dlg.changes.items():
+                mgr.set_gender(cid, gender)
+            self.log_line(
+                f"◆ Género corregido a mano en {len(dlg.changes)} personaje(s)")
+            self._refresh_cast()
 
     def _detect_cast(self):
         if not self._current_book_id:
@@ -866,7 +956,8 @@ class MainWindow(QFrame):
             return
         texts = [c.text for c in self.db.chapters(self._current_book_id)]
         names = detect_characters(texts)
-        created = CastManager(self.db).build_cast(self._current_book_id, names)
+        # v0.7.0: se pasan los textos para inferir el género por contexto.
+        created = CastManager(self.db).build_cast(self._current_book_id, names, texts)
         self.log_line(f"◆ Reparto: {len(names)} personajes detectados, {created} nuevos")
         toast(self, f"◆ Reparto: {len(names)} personajes", kind="ok")
         self._refresh_cast()

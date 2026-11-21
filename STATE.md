@@ -1,7 +1,7 @@
 # AUREA — Estado compactado (STATE.md)
 
 Generado: 2026-11-12. Actualizado tras implementar mejoras para EL QUINTO SOL (reglas de pausas v2, soporte Markdown v2, sistema de dirección, clonación XTTS integrada).
-**Actualizado 2026-11-21: reparación de auditoría (Fases 1–5) + acabado cyberpunk premium + versión 0.5.0. Actualizado 2026-11-21: OCR local para PDF escaneados + versión 0.6.0.** Ver las secciones "Reparación 2026-11-20/21" y "OCR para PDF escaneados (v0.6.0)" al final.
+**Actualizado 2026-11-21: reparación de auditoría (Fases 1–5) + acabado cyberpunk premium + versión 0.5.0. Actualizado 2026-11-21: OCR local para PDF escaneados + versión 0.6.0. Actualizado 2026-11-21: reparto inteligente por género + ambientes con ducking + versión 0.7.0.** Ver las secciones "Reparación 2026-11-20/21", "OCR para PDF escaneados (v0.6.0)" y "Reparto inteligente por género + ambientes con ducking (v0.7.0)" al final.
 Uso: leer este archivo y la memoria antes de seguir trabajando. No rehacer lo ya hecho.
 
 ## Qué se está construyendo
@@ -22,7 +22,7 @@ Fases aplicadas sobre el código en disco:
 - Clonación XTTS en reparto: `casting/cast_manager.py` (`build_cast` asigna voces Kokoro por defecto `ef_dora`/`em_santa`; las voces clonadas XTTS se asignan desde la GUI). `voice_map` devuelve `(engine, voz, velocidad)`. `ui/clone_panel.py` (flujo simplificado: importar → asignar, con selector Kokoro/XTTS). `ui/main_window.py` (página Reparto muestra voces asignadas).
 
 Archivos fuente clave (`/home/aegis2/aurea/aurea/`):
-- `__init__.py` (versión `0.5.0` — única constante, leída por la ventana; antes `0.4b+4c` en `__init__.py` y `0.5` fijo en el título)
+- `__init__.py` (versión `0.7.0` — única constante, leída por la ventana; antes `0.4b+4c` en `__init__.py` y `0.5` fijo en el título)
 - `core/models.py` (Character con `engine` y `voice_profile_id`; Segment con campos de dirección)
 - `core/database.py` (`add_segment` con `pause_after_ms`; `add_character_with_profile`; `update_character` con `engine`/`profile_id`; migraciones de columnas de clonación y dirección)
 - `core/generator.py` (ChapterGenerator QThread; `_concat` con `pause_after_ms`, defensa contra `[` en TTS, manejo estéreo/mono; procesamiento de audio por segmento y master final vía `audio_processor`)
@@ -212,6 +212,100 @@ Ver la sección "Reparación 2026-11-20/21" arriba (conteos exactos 2026-11-21).
 - Muestra REAL Popol Vuh págs. 1–10 (`scripts/verificar_ocr_popolvuh.py`, reporte `output/ocr_popolvuh-muestra_reporte.md`): 10 OCR / 0 texto, conf media 72.7, revisar [1, 3, 4] (portada p1 46.2, portadilla p3 60.3, colofón p4 44.4; cuerpo p5–p10: 75.0–89.5), 0 encabezados/pies (esta edición no los tiene en pp. 1–10), 5 números eliminados (p2 «11», p7 «8», p8 «9», p9 «10», p10 «: 1»), 27 palabras desguionadas, 122 palabras conf <40, 5.42 s/pág. (54.2 s total, corrida en frío) → libro completo (183 págs.) estimado ~16.5 min; 2ª corrida 0.3 s (10/10 caché). 0 `[` en el texto (9,492 caracteres). Págs. a 2 columnas detectadas [1, 4] = falsos positivos (portada/colofón, no cuerpo a 2 columnas); PSM 6 en todas. **Corrección 2026-11-21 (verificación propia de Nova):** el desguionado no se reexaminaba tras unir y dejaba 7 guiones con dos cortes seguidos (p. ej. elocuen-/cia); ahora une en cadena — 27 uniones (antes 23), 0 continuaciones en minúscula sin unir; los 3 guiones restantes son continuación en mayúscula (regla: no se unen) o ruido de portada. Test de regresión `test_dehyphenation_chained` añadido.
 - Suite completa: `pytest tests/test_aurea.py tests/test_ocr.py` 31/31 (16 existentes + 15 OCR, incl. el nuevo test de desguionado en cadena); `verificar_pausas/wav_capitulo/direccion/md` OK; smoke GUI offscreen OK (MainWindow + OcrOptionsDialog, spa+eng, 300 DPI).
 - La verificación real del libro completo (183 págs.) espera a Alberto. Advertencia honesta: el escaneo fuente es de ~100 DPI (464×656 px por página); el cuerpo se lee bien (conf 75–90) pero con errores de OCR («mo se encore traban», «habán», «laz obras»); portada/portadilla/colofón salen mal (conf 44–60) y conviene revisarlos o excluirlos al importar.
+
+## Reparto inteligente por género + ambientes con ducking (v0.7.0, 2026-11-21)
+
+**Decisiones de Alberto (2026-11-20):** (1) las etiquetas Kokoro `em_*`
+son masculinas y `ef_*` femeninas — el casting automático asigna según
+el género del personaje; (2) formato del Popol Vuh = dramatizado
+completo / teatro sonoro; (3) ambientes sintetizados APROBADOS ("si
+pasa") — se mezclan bajo la narración con ducking.
+
+### A. Reparto inteligente por género
+- `aurea/casting/gender.py` (nuevo): `infer_gender(nombre, contexto)`
+  -> (género, fuente). Orden: (1) léxico (español común + Popol Vuh +
+  EL QUINTO SOL; "guadalupe" NO está: unisex en México, solo el
+  contexto lo decide), (2) títulos don/doña/señor/señora, (3) artículos
+  el/la delante del nombre en el contexto, (4) terminaciones -o/-a
+  (con excepciones Ezra/Luca/Noa y Rosario/Amparo/Consuelo/Socorro).
+  Sin pista -> "desconocido": NUNCA se inventa. `voice_gender(id)` lee
+  el género de la voz Kokoro por su prefijo (`em_*`/`ef_*`; XTTS ->
+  desconocido).
+- `aurea/casting/cast_manager.py`: `build_cast(book_id, names, texts)`
+  (los textos son opcionales, para el contexto); masculino -> `em_santa`,
+  femenino -> `ef_dora`, desconocido -> rotación de las voces por
+  defecto (nunca `em_alex`, reservado al narrador). Solo hay UNA voz
+  Kokoro en español por género además del narrador: al repetir voz, la
+  velocidad rota 1.0/0.95/1.05 para diferenciar personajes. Reglas:
+  nunca `ef_*` a un masculino ni `em_*` a una femenina; lo existente
+  NO se reasigna solo (un personaje viejo sin género lo recibe inferido,
+  con su voz intacta); `set_gender()` (corrección manual) marca
+  `gender_manual=1` y CONSERVA la voz. `cast_info()` devuelve por
+  personaje género, género de voz y `mismatch` (voz del otro género).
+- BD (migración v0.7.0, automática): `characters.gender` /
+  `characters.gender_manual`; `Character` en `core/models.py` igual.
+- UI (`ui/main_window.py` + `ui/gender_dialog.py` nuevo): el reparto
+  muestra `Nombre [M/F/?] → voz (M/F)` con marcas "◆ sin confirmar" y
+  "◆ voz no encaja"; botón "✎ Corregir género" abre el diálogo (un
+  combo por personaje; la voz no cambia al corregir el género).
+- El detector NO se tocó: no guarda género; `build_cast` recibe los
+  textos del libro como contexto (cambio mínimo).
+
+### B. Ambientes con ducking
+- `aurea/core/ambience.py` (nuevo): generadores procedurales adaptados
+  de `~/workspace/aurea-ambientes/generar_ambientes.py` (viento, lluvia,
+  fuego, selva de noche), ahora con `sr` paramétrico y sin fades en el
+  bucle. Sin modelos, sin nube, CPU-only, numpy+soundfile (ya eran
+  dependencias; NADA nuevo que licenciar).
+- Caché: `BedCache` genera un bucle de 60 s por ambiente en
+  `AUREA_HOME/ambience_cache/bed_<nombre>_<sr>hz_v1.wav` (semillas
+  fijas: la misma cama suena igual siempre); la 2ª generación lo lee
+  de disco sin regenerar. `tile_bed` repite el bucle con crossfade de
+  1 s en las juntas (sin clics).
+- Mezcla: `mix_ambience(narración, cama, sr, bed_level=0.25,
+  duck_level=0.30, fade_s=2.0)`. La cama suena al 25% en los silencios
+  y baja al 30% de su nivel (7.5% absoluto) mientras hay voz
+  (envolvente RMS por ventanas de 50 ms, ataque 80 ms, liberación
+  300 ms). Fades lineales de 2 s SOLO sobre la cama al inicio/fin del
+  capítulo. Si la suma supera 0.99 se escala todo (no se recorta).
+- Integración mínima en `core/generator.py`: `_concat(..., ambience,
+  bed_level)` mezcla ANTES de `process_master` (el master normaliza el
+  conjunto y conserva la relación voz/cama); un fallo de mezcla nunca
+  mata el capítulo (mismo patrón try/except que A9). `ChapterGenerator`
+  acepta `ambience`/`bed_level` o los lee del capítulo. TTS,
+  segmentación, detector y director INTACTOS.
+- BD (migración v0.7.0): `chapters.ambience` (default 'none') /
+  `chapters.bed_level` (default 0.25); `Chapter` en `core/models.py`
+  igual; `db.set_chapter_ambience()`.
+- UI (Estudio): combo "Ambiente" (Sin ambiente / Viento / Lluvia /
+  Fuego / Selva de noche — recomendado para el Popol Vuh) + nivel de
+  cama 0.05–0.60 (defecto 0.25). Se guarda por capítulo y se carga al
+  cambiar de capítulo; se aplica en la próxima generación.
+- Recomendación documentada: selva de noche para el Popol Vuh
+  (grillos + viento suave + zumbido grave).
+
+### Tests v0.7.0 (2026-11-21, VM)
+- `tests/test_v070.py` (nuevo): **18/18** (léxico Popol Vuh/Quinto
+  Sol; títulos/artículos/terminaciones; desconocido nunca inventado;
+  prefijo de voz; pick_voice sin cruces + rotación de velocidad;
+  build_cast por género; personaje viejo gana género sin perder voz;
+  corrección manual conserva voz y bloquea re-inferencia; nombres
+  duplicados no revientan; mismatch;
+  caché genera una vez; tile sin salto en juntas; ducking por RMS
+  voz<0.6×pausa; envolvente; fades; mix none passthrough; ambiente
+  persistido; _concat con ambiente produce WAV con cama en la pausa).
+- Suite completa: `pytest tests/test_aurea.py tests/test_ocr.py
+  tests/test_v070.py` **49/49 en 2 corridas consecutivas** (16+15+18).
+- `verificar_pausas/wav_capitulo/direccion/md`: TODAS PASAN.
+- Smoke GUI offscreen (`/tmp/smoke_v070.py`, efímero): **20/20**
+  (ventana 0.7.0, combo ambiente 5 opciones, reparto [M]/[F]/[?],
+  diálogo de género, ambiente guardado/recargado, generación completa
+  con selva de noche -> WAV estéreo final).
+- Medido: la cama de selva de noche en pausa queda en RMS ~0.004 tras
+  el master (tenue, por diseño: grillos dispersos + cama al 25%).
+- Sin verificar en VM: voces Kokoro reales, XTTS real, aspecto visual
+  de la GUI y el sonido real de la mezcla (solo en la laptop de
+  Alberto, con sus oídos).
 
 ## Regla de trabajo (compacción)
 En cada pausa natural, revisar el consumo de contexto. Si supera ~70 %, escribir/actualizar `STATE.md` antes de continuar: qué se construye, qué está hecho (rutas exactas), qué falta, decisiones y siguiente paso. Al iniciar o reanudar, leer primero `STATE.md`; si no existe, partir de cero sin asumir progreso previo (no es error).
