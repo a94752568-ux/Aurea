@@ -20,6 +20,8 @@ Reglas que no se rompen:
     (1.0 / 0.95 / 1.05 en rotación): solo hay una voz Kokoro en
     español por género además del narrador.
 """
+from pathlib import Path
+
 from ..core.database import Database
 from ..voice import clone_store
 from .gender import (
@@ -77,6 +79,76 @@ class CastManager:
         if gender not in (MASCULINO, FEMENINO, DESCONOCIDO):
             raise ValueError(f"Género no válido: {gender!r}")
         self.db.update_gender(character_id, gender)
+
+    def sanitize_cast(self, book_id, valid_kokoro_voices):
+        """Reconcilia el reparto con la realidad de los motores (v0.6 Electron).
+
+        Restaurado en v0.7.3: el método vivía solo en la rama Electron y
+        el tarball v0.7.2 lo borró al sobrescribir este archivo (E-C1).
+        Los llamadores son `core/engine.py:186`, `core/scratch.py:43` y
+        `POST /api/books/{id}/cast-sanitize`: todos esperan un entero
+        con el nº de personajes reconciliados.
+
+        Reglas (las del docstring de `engine.py:7-9`):
+          - Perfil clonado XTTS cuyo NOMBRE está en `voice` de un
+            personaje (p. ej. "em_origins") -> engine='xtts' con su
+            profile_id (solo si la muestra existe en disco).
+          - Voz Kokoro inexistente (no está en `valid_kokoro_voices`)
+            -> voz del narrador.
+          - Personaje XTTS con perfil borrado o muestra perdida ->
+            voz del narrador.
+        Solo toca personajes con voz inválida; nunca inventa voces ni
+        reasigna las válidas. Idempotente: una segunda llamada devuelve 0.
+        Si `valid_kokoro_voices` viene vacío no se toca nada (no se puede
+        distinguir una voz inválida de un conjunto vacío).
+        """
+        valid = set(valid_kokoro_voices or [])
+        if not valid:
+            return 0
+        chars = self.db.characters(book_id)
+        narrator = next((c for c in chars if c.is_narrator), None)
+        narr_voice = (narrator.voice if narrator and narrator.voice in valid
+                      else "em_alex")
+        profiles = {p["name"]: p for p in self._available_clones()}
+        fixed = 0
+        for c in chars:
+            engine = c.engine or "kokoro"
+            if engine == "xtts":
+                prof = None
+                if c.voice_profile_id:
+                    prof = clone_store.get_profile(c.voice_profile_id)
+                if prof is None and c.voice in profiles:
+                    prof = profiles[c.voice]
+                sample = (prof or {}).get("sample_path")
+                if prof is not None and sample and Path(sample).exists():
+                    if c.voice_profile_id != prof["id"]:
+                        self.db.update_character(
+                            c.id, c.voice, c.speed,
+                            engine="xtts", profile_id=prof["id"])
+                        fixed += 1
+                    continue
+                # Perfil borrado o muestra perdida -> voz del narrador.
+                self.db.update_character(c.id, narr_voice, c.speed,
+                                         engine="kokoro", profile_id=None)
+                fixed += 1
+                continue
+            # Motor Kokoro (o sin motor): ¿la voz es un perfil clonado
+            # guardado por nombre?
+            if c.voice in profiles:
+                prof = profiles[c.voice]
+                sample = prof.get("sample_path")
+                if sample and Path(sample).exists():
+                    self.db.update_character(c.id, c.voice, c.speed,
+                                             engine="xtts",
+                                             profile_id=prof["id"])
+                    fixed += 1
+                    continue
+            # Voz Kokoro inexistente -> voz del narrador.
+            if c.voice not in valid:
+                self.db.update_character(c.id, narr_voice, c.speed,
+                                         engine="kokoro", profile_id=None)
+                fixed += 1
+        return fixed
 
     def build_cast(self, book_id, names, texts=None):
         """Crea el reparto detectado; los existentes no se reasignan.
