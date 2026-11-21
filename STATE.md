@@ -1,7 +1,7 @@
 # AUREA — Estado compactado (STATE.md)
 
 Generado: 2026-11-12. Actualizado tras implementar mejoras para EL QUINTO SOL (reglas de pausas v2, soporte Markdown v2, sistema de dirección, clonación XTTS integrada).
-**Actualizado 2026-11-21: reparación de auditoría (Fases 1–5) + acabado cyberpunk premium + versión 0.5.0. Actualizado 2026-11-21: OCR local para PDF escaneados + versión 0.6.0. Actualizado 2026-11-21: reparto inteligente por género + ambientes con ducking + versión 0.7.0.** Ver las secciones "Reparación 2026-11-20/21", "OCR para PDF escaneados (v0.6.0)" y "Reparto inteligente por género + ambientes con ducking (v0.7.0)" al final.
+**Actualizado 2026-11-21: reparación de auditoría (Fases 1–5) + acabado cyberpunk premium + versión 0.5.0. Actualizado 2026-11-21: OCR local para PDF escaneados + versión 0.6.0. Actualizado 2026-11-21: reparto inteligente por género + ambientes con ducking + versión 0.7.0. Actualizado 2026-11-21: normalización por segmento + versión 0.7.1.** Ver las secciones "Reparación 2026-11-20/21", "OCR para PDF escaneados (v0.6.0)", "Reparto inteligente por género + ambientes con ducking (v0.7.0)" y "Normalización por segmento (v0.7.1)" al final.
 Uso: leer este archivo y la memoria antes de seguir trabajando. No rehacer lo ya hecho.
 
 ## Qué se está construyendo
@@ -16,7 +16,7 @@ Fases aplicadas sobre el código en disco:
 - Fase 4c Clonación XTTS: `voice/clone_store.py`, `voice/sample_prep.py`, `voice/xtts_adapter.py`, `ui/clone_panel.py` (simplificado), `scripts/smoke_fase4c.py`. Reparte asigna voces XTTS automáticamente (`casting/cast_manager.py`). Requiere `pip install coqui-tts` + PyTorch/CPU.
 - Reglas de pausas (v2): `direction/rules.py` con vocabularios de espec 4.1 (12 emociones, 6 volúmenes, 5 ritmos), defaults de volumen por verbo (4.2), `direct_segment` rellena pausas de TODOS los segmentos (nunca NULL), prioridad marcador > hablante > puntuación > 0. `core/generator.py` (`segmentize` procesa marcadores; `_concat` honra `pause_after_ms` y elimina pausa duplicada). `core/database.py` (`add_segment` acepta `pause_after_ms`, `update_character` con `engine`/`profile_id`, `add_character_with_profile`).
 - Soporte Markdown .md (v2): `ingestion/md_reader.py` (H1=nuevo capítulo con segmento de anuncio narrador + pausa 800ms; H2/H3=corte de sección con pausa 800/500ms; `---`=800ms; limpieza de formato; listas como segmentos con pausa de coma 180ms; marcadores de pausa), `ingestion/importer.py` (registra .md), `ui/main_window.py` (.md en filtro de archivo).
-- Procesamiento de audio automático: `core/audio_processor.py` (normalización RMS, compresión, limitador, potenciador de graves, herramientas estéreo). **CORREGIDO 2026-11-20 (A9):** `process_master` SÍ está integrado en `core/generator.py:_concat` (línea ~310), dentro de try/except (un fallo de procesado nunca mata el capítulo; registra aviso). Verificado de verdad: RMS crudo 0.354/0.224 → RMS final 0.127 (target 0.14). `process_segment` existe en AudioProcessor pero NO está conectado (los segmentos van en crudo a `_concat`); no afirmar lo contrario.
+- Procesamiento de audio automático: `core/audio_processor.py` (normalización RMS, compresión, limitador, potenciador de graves, herramientas estéreo). **CORREGIDO 2026-11-20 (A9):** `process_master` SÍ está integrado en `core/generator.py:_concat` (línea ~310), dentro de try/except (un fallo de procesado nunca mata el capítulo; registra aviso). Verificado de verdad: RMS crudo 0.354/0.224 → RMS final 0.127 (target 0.14). `process_segment` (completo) existe en AudioProcessor pero NO es el que usa el generador; desde v0.7.1 los segmentos se procesan con la variante ligera `process_segment_light` (RMS 0.12 + limitar) vía `_process_segment` en `generator.py:run()`, antes de la ganancia dirigida (ver sección v0.7.1).
 - Tema Cyberpunk Neon para la GUI: `ui/theme.py` (paleta COLORS cian #00f3ff + magenta #ff00ff + texto #e8fbff + fondo #080c18, QSS global con bordes de color, `apply_dark_palette()` para QPalette Fusion oscura, `HudPanel` con esquinas bracket, `Sidebar`, `WaveformView`, `toast`). Integrado en `main_window.py` vía `apply_theme` + `apply_dark_palette`.
 - Flujo dirigir-antes-de-generar: `main_window.py:_generate_chapter_with_direction()` dirige automáticamente segmentos no dirigidos antes de generar audio. Botón "🎬 Dirigir" en página Estudio. `_ensure_segments()` crea segmentos automáticamente al importar un capítulo vacío. `DirectionWorker` + `ChapterGenerator` encadenados. Feedback con QMessageBox en todos los puntos de fallo. Primer capítulo seleccionado automáticamente al importar.
 - Clonación XTTS en reparto: `casting/cast_manager.py` (`build_cast` asigna voces Kokoro por defecto `ef_dora`/`em_santa`; las voces clonadas XTTS se asignan desde la GUI). `voice_map` devuelve `(engine, voz, velocidad)`. `ui/clone_panel.py` (flujo simplificado: importar → asignar, con selector Kokoro/XTTS). `ui/main_window.py` (página Reparto muestra voces asignadas).
@@ -155,7 +155,7 @@ Ver la sección "Reparación 2026-11-20/21" arriba (conteos exactos 2026-11-21).
 
 ## Problemas conocidos (audio / TTS)
 - Pronunciación en español con Kokoro fp16: "baja" suena como "paja", nombres propios enredados. Limitaciones del G2P (Misaki/espeak-ng), no del código.
-- `process_segment` existe pero no está conectado (ver A9 arriba): los segmentos no se procesan individualmente, solo el master final.
+- Desde v0.7.1 los segmentos SÍ se procesan individualmente (variante ligera, ver A9 arriba); antes solo se aplicaba el master final.
 - 4 segmentos existentes en BD tenían `[pausa=Xs]` sin limpiar. Ya limpiados (0 restantes). **Desde 2026-11-20, `_concat` ya NO lanza ValueError por corchetes** (A5): un `[` restante es contenido legítimo.
 
 ## Siguiente paso concreto
@@ -306,6 +306,72 @@ pasa") — se mezclan bajo la narración con ducking.
 - Sin verificar en VM: voces Kokoro reales, XTTS real, aspecto visual
   de la GUI y el sonido real de la mezcla (solo en la laptop de
   Alberto, con sus oídos).
+
+## Normalización por segmento (v0.7.1, 2026-11-21) — A9 completado
+
+- **Qué se conectó:** `AudioProcessor.process_segment_light` en
+  `core/generator.py:run()` vía el ayudante `_process_segment(samples,
+  sr, log)`, justo después de la síntesis (Kokoro y XTTS, ambas rutas
+  convergen ahí) y ANTES de `_gain_for`. El master (`process_master`)
+  sigue aplicándose al final en `_concat`, como siempre.
+- **Variante elegida: LIGERA (normalizar RMS 0.12 + limitar 0.90),
+  no la completa.** Medida con audio sintético real
+  (`/tmp/medir_v071.py`, 2026-11-21, segmentos RMS 0.05/0.15/0.35):
+  la ligera deja los tres en RMS **0.1200 exacto**; la completa los
+  deja en ~0.10 (su propio compresor baja el RMS tras normalizar).
+  En cadena completa (variante → ganancia dirigida → concat →
+  master), ligera y completa terminan IGUAL: RMS por segmento
+  (susurro/normal/grito) [0.048, 0.142, 0.172] ligera frente a
+  [0.047, 0.141, 0.173] completa; final RMS 0.1229 frente a 0.1230.
+  Pero la completa DUPLICA el procesado del master: bass_ratio 0.013
+  frente a 0.005 (control sin proceso por segmento: 0.005) y crest
+  2.71 frente a 2.97 (más aplastado). La ligera es además ~10x más
+  rápida (sin el bucle Python de bass_boost). `process_segment`
+  (completa) se conserva en la clase por compatibilidad, documentada
+  como no usada por el generador.
+- **Por qué antes de la ganancia:** `_gain_for` (susurro ×0.33,
+  grito ×1.25, intensidad) es intencional. Medido: tras procesar +
+  ganancia, el susurro queda 3.8x más bajo que el grito, igual que
+  la ganancia pedida. Si se normalizara DESPUÉS, susurro y grito
+  sonarían igual y la dirección perdería sentido. Control sin
+  proceso por segmento (v0.7.0): RMS por segmento [0.008, 0.077,
+  0.201] — 25x de diferencia; la voz baja quedaba casi inaudible.
+- **Guarda de silencio:** `AudioProcessor.SEGMENT_SILENCE_RMS =
+  0.005`. Un segmento con RMS por debajo se devuelve en crudo, sin
+  procesar. La ganancia con tope 8x sola NO basta como guarda: un
+  silencio de RMS 1e-4 subiría ×8 (a 0.0008) con ambas variantes.
+  La voz real de Kokoro/XTTS sale con RMS >= 0.01 (probado: RMS
+  0.01 sí se procesa, a 0.08 por el tope 8x), así que 0.005 deja
+  2x de margen por debajo de la voz más baja real.
+- **Orden verificado:** la cama se mezcla en `_concat` DESPUÉS de
+  los segmentos y ANTES del master (código v0.7.0, sin cambios); el
+  procesado por segmento nunca toca la cama. Test
+  `test_ambience_mixed_after_segments`: cama presente en la pausa
+  con ambiente, silencio sin él.
+- **Seguridad ante fallos:** try/except por segmento en
+  `_process_segment` (mismo patrón que el master): si falla, el
+  segmento se guarda en crudo y se registra el aviso; nunca mata
+  el capítulo. Test `test_processing_failure_keeps_raw`.
+- **Sin UI nueva:** no hizo falta; el procesado es automático y
+  silencioso. Sin dependencias nuevas. Sin cambios en detector.py,
+  director.py ni en el formato de segmentos.
+
+### Tests v0.7.1 (2026-11-21, VM)
+- `tests/test_v071.py` (nuevo): **11/11** (ligera da RMS 0.1200
+  exacto en 0.05/0.15/0.35; segmentos nivelados; nivelados tras el
+  master en la banda 0.14 ± 0.06; silencio 1e-4 intacto, sin
+  amplificar; voz bajita real 0.01 procesada a 0.08; piso 0.005
+  (0.004 no se toca, 0.006 sí); dinámica dirigida preservada
+  (susurro/grito ~3.8x); fallo de procesado guarda en crudo; la
+  completa nunca se llama desde el gancho; master sigue al final
+  con RMS ≈ 0.14 y sin clipping; cama después de los segmentos).
+- Suite completa: `pytest tests/test_aurea.py tests/test_ocr.py
+  tests/test_v070.py tests/test_v071.py` **60/60 en 2 corridas
+  consecutivas** (16+15+18+11).
+- `verificar_pausas/wav_capitulo/direccion/md`: TODAS PASAN.
+- Queda por verificar en la laptop de Alberto: voces Kokoro/XTTS
+  reales con niveles distintos (el objetivo real del cambio), y
+  escuchar que susurro y grito sigan diferenciándose.
 
 ## Regla de trabajo (compacción)
 En cada pausa natural, revisar el consumo de contexto. Si supera ~70 %, escribir/actualizar `STATE.md` antes de continuar: qué se construye, qué está hecho (rutas exactas), qué falta, decisiones y siguiente paso. Al iniciar o reanudar, leer primero `STATE.md`; si no existe, partir de cero sin asumir progreso previo (no es error).

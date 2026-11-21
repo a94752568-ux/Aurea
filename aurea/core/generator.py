@@ -115,6 +115,30 @@ def _gain_for(seg):
     return min(gain, 1.4)
 
 
+def _process_segment(samples, sr, log=None):
+    """Procesa un segmento sintetizado (v0.7.1, A9 completado).
+
+    Variante LIGERA (normalizar RMS 0.12 + limitar 0.90): medida mejor
+    que la completa (ver AudioProcessor.process_segment_light). Se aplica
+    ANTES de la ganancia dirigida: _gain_for (susurro/grito/intensidad)
+    es intencional y no debe aplanarse por la normalización.
+    Guarda de silencio: RMS < SEGMENT_SILENCE_RMS (0.005) -> se devuelve
+    en crudo, sin amplificar (la ganancia con tope 8x sola NO basta:
+    un silencio de RMS 1e-4 subiría x8). Un fallo de procesado nunca
+    mata el segmento: se guarda en crudo y se registra el aviso.
+    """
+    samples = np.asarray(samples, dtype=np.float32)
+    rms = float(np.sqrt(np.mean(samples ** 2) + 1e-12))
+    if rms < AudioProcessor.SEGMENT_SILENCE_RMS:
+        return samples
+    try:
+        return AudioProcessor(sr=sr).process_segment_light(samples, sr=sr)
+    except Exception as e:
+        if log is not None:
+            log(f"⚠ process_segment falló ({e}); segmento en crudo")
+        return samples
+
+
 class ChapterGenerator(QThread):
     progress = Signal(int, str)
     log = Signal(str)          # M7: el log va por su propia señal; antes
@@ -226,6 +250,12 @@ class ChapterGenerator(QThread):
                             voice=(fallback[1] if use_xtts else voice),
                             speed=vspeed * pace)
                         voice_tag = voice if not use_xtts else f"{fallback[1]} (fallback)"
+                    # v0.7.1: procesado por segmento ANTES de la ganancia
+                    # dirigida (la ganancia de susurro/grito es intencional
+                    # y no debe aplanarse por la normalización). La cama de
+                    # ambiente se mezcla después, en _concat, así que el
+                    # procesado por segmento nunca la toca.
+                    samples = _process_segment(samples, sr, log=self.log.emit)
                     samples = np.clip(samples * _gain_for(seg), -1.0, 1.0)
                     seg_wav = out_dir / f"cap_{self.chapter.idx:03d}_seg{seg.idx:04d}.wav"
                     adapter.save_wav(seg_wav, samples, sr)

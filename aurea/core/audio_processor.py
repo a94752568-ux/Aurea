@@ -23,6 +23,11 @@ class AudioProcessor:
     BASS_BOOST_DB = 2.5            # ganancia de graves en dB
     BASS_CUTOFF_HZ = 180           # frecuencia de corte del filtro de graves
     STEREO_WIDTH = 1.0             # 1.0 = sin cambio, >1 = más ancho
+    # v0.7.1: piso de silencio para el procesado por segmento. Un segmento
+    # con RMS por debajo NO se procesa (ni se amplifica): es silencio
+    # digital o ruido residual, no voz. La voz real de Kokoro/XTTS sale
+    # con RMS >= 0.01, así que 0.005 deja un margen de 2x por debajo.
+    SEGMENT_SILENCE_RMS = 0.005
 
     def __init__(self, sr=24000):
         self.sr = sr
@@ -138,6 +143,10 @@ class AudioProcessor:
         """Pipeline completo para un segmento individual.
 
         Orden: normalizar RMS -> comprimir -> limitar -> graves -> estéreo.
+        v0.7.1: NO es el que usa el generador (ver process_segment_light):
+        su compresor y sus graves se duplicarían con los del master
+        (medido: bass_ratio 0.013 frente a 0.005, crest 2.71 frente a
+        2.97). Se conserva por compatibilidad y para uso manual.
         """
         if sr is not None and sr != self.sr:
             # re-muestreo simple por omisión (igual tasa esperada)
@@ -147,6 +156,25 @@ class AudioProcessor:
         samples = self.limit(samples)
         samples = self.bass_boost(samples)
         samples = self.stereo_width(samples)
+        return samples
+
+    def process_segment_light(self, samples, sr=None):
+        """Variante ligera para un segmento individual (v0.7.1, la que usa
+        el generador): solo normalizar RMS (0.12) + limitar (0.90).
+
+        Elegida por medición (ver /tmp/medir_v071.py, 2026-11-21): iguala
+        la sonoridad entre segmentos exactamente igual que la completa
+        (RMS 0.1200 en los tres niveles probados, frente a ~0.10 de la
+        completa, que baja por su propio compresor) y NO duplica la
+        compresión ni los graves del master (bass_ratio 0.005, igual que
+        el control sin proceso por segmento; crest 2.97 frente a 2.71).
+        Además es ~10x más rápida (sin el bucle Python de bass_boost) y
+        conserva la forma del audio (mono sigue mono; _concat ya pasa a
+        estéreo). La dinámica dirigida (susurro/grito) se aplica DESPUÉS
+        en el generador, así que no se aplana.
+        """
+        samples = self.normalize_rms(samples)
+        samples = self.limit(samples)
         return samples
 
     def process_master(self, samples, sr=None):
