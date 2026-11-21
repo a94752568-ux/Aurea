@@ -25,9 +25,24 @@ DIALOGUE_PAUSE_S = 0.25
 
 
 def _split_chunk(p, max_chars=MAX_SEG):
+    """Parte un texto largo en trozos de <= max_chars SIN cortar palabras.
+
+    v0.7.2: antes cortaba en max_chars a mitad de palabra si no había
+    ". " en la ventana ("afil" | "aban" se oían como dos palabras rotas:
+    un "corte" audible en mitad de la palabra). Ahora el corte cae en el
+    último ". " / ", " / "; " / espacio antes del límite; solo si no hay
+    ningún espacio en la ventana se corta en max_chars (token único).
+    """
     while len(p) > max_chars:
-        cut = p.rfind(". ", 0, max_chars)
-        cut = cut + 1 if cut > max_chars // 2 else max_chars
+        window = p[:max_chars]
+        cut = None
+        for sep, keep in ((". ", 1), (", ", 1), ("; ", 1), (" ", 0)):
+            idx = window.rfind(sep)
+            if idx > max_chars // 2:
+                cut = idx + keep
+                break
+        if cut is None:
+            cut = max_chars
         yield p[:cut].strip()
         p = p[cut:].strip()
     if p:
@@ -139,6 +154,23 @@ def _process_segment(samples, sr, log=None):
         return samples
 
 
+def _apply_directed_gain(samples, seg):
+    """Ganancia dirigida (susurro/grito/intensidad) con techo de pico.
+
+    v0.7.2: antes `np.clip(samples * gain, -1.0, 1.0)` recortaba en plano
+    los picos de un grito (ganancia hasta 1.4 sobre un pico ya
+    normalizado). Ahora la ganancia baja lo justo para que el pico quede
+    en 0.98: sin muestras recortadas y sin perder la intención (el
+    susurro sigue ~3.8x por debajo del grito).
+    """
+    samples = np.asarray(samples, dtype=np.float32)
+    gain = _gain_for(seg)
+    peak = float(np.max(np.abs(samples))) if samples.size else 0.0
+    if peak * gain > 0.98:
+        gain = 0.98 / peak if peak > 0 else gain
+    return samples * gain
+
+
 class ChapterGenerator(QThread):
     progress = Signal(int, str)
     log = Signal(str)          # M7: el log va por su propia señal; antes
@@ -236,7 +268,8 @@ class ChapterGenerator(QThread):
                             xtts = XTTSAdapter()
                             xtts.load()
                         samples, sr = xtts.generate(
-                            seg.text, speaker_wav=sample, speed=vspeed * pace)
+                            seg.text, speaker_wav=sample, speed=vspeed * pace,
+                            log=self.log.emit)
                         voice_tag = "clon"
                     else:
                         if use_xtts:
@@ -248,7 +281,7 @@ class ChapterGenerator(QThread):
                         samples, sr = adapter.synthesize(
                             seg.text,
                             voice=(fallback[1] if use_xtts else voice),
-                            speed=vspeed * pace)
+                            speed=vspeed * pace, log=self.log.emit)
                         voice_tag = voice if not use_xtts else f"{fallback[1]} (fallback)"
                     # v0.7.1: procesado por segmento ANTES de la ganancia
                     # dirigida (la ganancia de susurro/grito es intencional
@@ -256,7 +289,9 @@ class ChapterGenerator(QThread):
                     # ambiente se mezcla después, en _concat, así que el
                     # procesado por segmento nunca la toca.
                     samples = _process_segment(samples, sr, log=self.log.emit)
-                    samples = np.clip(samples * _gain_for(seg), -1.0, 1.0)
+                    # v0.7.2: ganancia dirigida con techo de pico (sin
+                    # recorte duro); ver _apply_directed_gain.
+                    samples = _apply_directed_gain(samples, seg)
                     seg_wav = out_dir / f"cap_{self.chapter.idx:03d}_seg{seg.idx:04d}.wav"
                     adapter.save_wav(seg_wav, samples, sr)
                     db.update_segment(seg.id, str(seg_wav), "done")
@@ -340,6 +375,14 @@ class ChapterGenerator(QThread):
             data, sr = sf.read(s.wav_path)
             if data.ndim == 1:
                 data = np.stack([data, data], axis=1)
+            # v0.7.2: junta a prueba de clics. Kokoro rellena con
+            # ~50 ms de casi-silencio y sus juntas salen limpias
+            # (medido: salto <= 0.00006), pero XTTS y las cachés viejas
+            # no lo garantizan. Quitar el DC y fundir 8 ms los bordes
+            # de CADA segmento hace la junta silenciosa sea cual sea
+            # el motor; la pausa entre segmentos se respeta igual.
+            data = AudioProcessor.remove_dc(data)
+            data = AudioProcessor.edge_fade(data, sr)
             clips.append(data)
             if i < len(ordered) - 1:
                 pause_ms = 0

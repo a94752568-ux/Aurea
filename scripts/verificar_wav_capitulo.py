@@ -67,7 +67,9 @@ class FakeKokoro:
     a su target 0.14, lo que permite verificar que CORRE (M23).
     """
 
-    def synthesize(self, text, voice="em_alex", speed=1.0):
+    def synthesize(self, text, voice="em_alex", speed=1.0, log=None):
+        # v0.7.2: el adaptador real acepta log (sustituciones de
+        # pronunciación); el falso refleja el contrato.
         dur = max(0.3, min(len(text) * 0.05, 3.0))
         t = np.linspace(0, dur, int(SR * dur), endpoint=False)
         samples = (0.5 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)

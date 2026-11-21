@@ -7,6 +7,14 @@ from kokoro_onnx import Kokoro
 from misaki import espeak
 from misaki.espeak import EspeakG2P
 
+from ..voice.pronunciation import prepare_text_for_tts
+
+# v0.7.2: español latinoamericano (seseo, /s/) en vez de peninsular
+# ("es": ceceo /θ/ en z/c+e/i — "Moctezuma" sonaba "Mocteθuma").
+# Verificado en VM con misaki 0.9.4: es-419 da mˌoktesˈuma, sjˈelo,
+# ˈase. Si la versión de misaki no acepta "es-419", se vuelve a "es".
+G2P_LANGUAGE = "es-419"
+
 MODELS_DIR = Path.home() / "aurea" / "models"
 VOICES_ES = ["em_alex", "ef_dora", "em_santa"]  # las 3 voces en español de Kokoro
 
@@ -23,7 +31,10 @@ class KokoroAdapter:
                 inst = super().__new__(cls)
                 inst._kokoro = None
                 inst._model_file = None
-                inst._g2p = EspeakG2P(language="es")
+                try:
+                    inst._g2p = EspeakG2P(language=G2P_LANGUAGE)
+                except Exception:
+                    inst._g2p = EspeakG2P(language="es")
                 inst._fallback = espeak.EspeakFallback(british=False)
                 cls._instance = inst
         return cls._instance
@@ -44,8 +55,11 @@ class KokoroAdapter:
         self._kokoro = Kokoro(str(model), str(voices))
         self._model_file = model_file
 
-    def synthesize(self, text, voice="em_alex", speed=1.0):
+    def synthesize(self, text, voice="em_alex", speed=1.0, log=None):
         self.load()
+        # v0.7.2: el texto se prepara SOLO para sintetizar (léxico +
+        # números en palabras); la BD y el guion no se tocan.
+        text, _subs = prepare_text_for_tts(text, log=log)
         phonemes, _ = self._g2p(text)
         return self._kokoro.create(phonemes, voice, speed=speed, is_phonemes=True)
 

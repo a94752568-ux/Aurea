@@ -65,7 +65,9 @@ class FakeKokoro:
     def __init__(self, delay=0.0):
         self.delay = delay
 
-    def synthesize(self, text, voice="em_alex", speed=1.0):
+    def synthesize(self, text, voice="em_alex", speed=1.0, log=None):
+        # v0.7.2: el adaptador real acepta log (sustituciones de
+        # pronunciación); el falso refleja el contrato.
         import time as _time
         if self.delay:
             _time.sleep(self.delay)

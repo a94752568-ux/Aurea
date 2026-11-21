@@ -4,6 +4,8 @@ import os, threading, time
 import numpy as np
 import soundfile as sf
 
+from .pronunciation import prepare_text_for_tts
+
 class XTTSAdapter:
     SAMPLE_RATE = 24000
 
@@ -20,10 +22,16 @@ class XTTSAdapter:
                 self._tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cpu")
         return self
 
-    def generate(self, text, speaker_wav, speed=1.0, out_path=None, language="es"):
-        """Genera audio clonado. Devuelve (audio ndarray float32, sr)."""
+    def generate(self, text, speaker_wav, speed=1.0, out_path=None, language="es",
+                 log=None):
+        """Genera audio clonado. Devuelve (audio ndarray float32, sr).
+
+        v0.7.2: el texto se prepara SOLO para sintetizar (léxico +
+        números en palabras); la BD y el guion no se tocan.
+        """
         self.load()
         self._cancel = False
+        text, _subs = prepare_text_for_tts(text, log=log)
         t0 = time.time()
         with self._lock:
             if self._cancel:

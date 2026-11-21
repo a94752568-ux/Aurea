@@ -1,7 +1,7 @@
 # AUREA — Estado compactado (STATE.md)
 
 Generado: 2026-11-12. Actualizado tras implementar mejoras para EL QUINTO SOL (reglas de pausas v2, soporte Markdown v2, sistema de dirección, clonación XTTS integrada).
-**Actualizado 2026-11-21: reparación de auditoría (Fases 1–5) + acabado cyberpunk premium + versión 0.5.0. Actualizado 2026-11-21: OCR local para PDF escaneados + versión 0.6.0. Actualizado 2026-11-21: reparto inteligente por género + ambientes con ducking + versión 0.7.0. Actualizado 2026-11-21: normalización por segmento + versión 0.7.1.** Ver las secciones "Reparación 2026-11-20/21", "OCR para PDF escaneados (v0.6.0)", "Reparto inteligente por género + ambientes con ducking (v0.7.0)" y "Normalización por segmento (v0.7.1)" al final.
+**Actualizado 2026-11-21: reparación de auditoría (Fases 1–5) + acabado cyberpunk premium + versión 0.5.0. Actualizado 2026-11-21: OCR local para PDF escaneados + versión 0.6.0. Actualizado 2026-11-21: reparto inteligente por género + ambientes con ducking + versión 0.7.0. Actualizado 2026-11-21: normalización por segmento + versión 0.7.1. Actualizado 2026-11-21: mitigación de anomalías de voz (pronunciación, clics, volumen) + versión 0.7.2.** Ver las secciones "Reparación 2026-11-20/21", "OCR para PDF escaneados (v0.6.0)", "Reparto inteligente por género + ambientes con ducking (v0.7.0)", "Normalización por segmento (v0.7.1)" y "Mitigación de anomalías de voz (v0.7.2)" al final.
 Uso: leer este archivo y la memoria antes de seguir trabajando. No rehacer lo ya hecho.
 
 ## Qué se está construyendo
@@ -372,6 +372,112 @@ pasa") — se mezclan bajo la narración con ducking.
 - Queda por verificar en la laptop de Alberto: voces Kokoro/XTTS
   reales con niveles distintos (el objetivo real del cambio), y
   escuchar que susurro y grito sigan diferenciándose.
+
+## Mitigación de anomalías de voz (v0.7.2, 2026-11-21)
+
+Alberto confirmó las tres: pronunciación, cortes/clics, volumen desigual.
+Diagnóstico hecho con Kokoro REAL en la VM (modelo fp16 descargado a
+`/home/hatch/aurea/models/`, voces em_alex/em_santa/ef_dora; misaki 0.9.4
++ kokoro-onnx instalados en `~/.venv-aurea`; faster-whisper tiny como
+oído aproximado). Archivos de medición: `/tmp/v072/` (G2P, síntesis,
+ASR, juntas, picos).
+
+### (1) Pronunciación — CONFIRMADO: el G2P era peninsular (ceceo)
+- `KokoroAdapter` usaba `EspeakG2P(language="es")`: **/θ/ en z/c+e/i**.
+  Medido: "Moctezuma" mˌokteθˈuma, "cielo" θjˈelo, "hace" ˈaθe,
+  "Citlali" θitlˈali, "Quetzalcóatl" kˌetθalkˈoatl. El ASR oyó
+  "Moctezuma" como "Pocte su ma" en las 3 voces (el ceceo es audible).
+- **Arreglo: G2P "es-419"** (latinoamericano, seseo /s/): "Moctezuma"
+  mˌoktesˈuma, "cielo" sjˈelo, "hace" ˈase, "Citlali" sitlˈali,
+  "Quetzalcóatl" kˌetsalkˈoatl. `aurea/tts/kokoro_adapter.py` usa
+  `G2P_LANGUAGE = "es-419"` con fallback a "es" si la versión de
+  misaki no lo acepta.
+- **"baja"->"paja" NO se reprodujo con Kokoro:** el G2P da /b/ correcto
+  (bˈaxa) y el ASR distingue "baja" de "paja" en par mínimo con las 3
+  voces. No se inventó una reescritura. Queda para oído en la laptop
+  (podría ser XTTS o un contexto concreto); si Alberto lo vuelve a oír
+  en una frase, reproducir con esa frase exacta.
+- **Léxico de pronunciación** (`aurea/voice/pronunciation.py` + archivo
+  editable `AUREA_HOME/pronunciation.json`, el usuario gana a la serie):
+  "Ixbalanqué"->"Ishbalanqué" (/iʃβalaŋˈke/ maya, verificado por fonemas),
+  "Xibalbá"->"Shibalbá" (/ʃibalˈba/), "Ixquic"->"Ishquic" (/iʃˈkik/).
+  Hunahpú/Moctezuma/Citlali/Quetzalcóatl no necesitan entrada (el G2P
+  es-419 ya los resuelve).
+- **Números en dígitos -> palabras** (mismo módulo, sin dependencias):
+  "1519"->"mil quinientos diecinueve", "1,000"->"mil" (espeak lo leía
+  "uno coma cero cero cero"), "3.5"->"tres punto cinco",
+  "50%"->"cincuenta por ciento". Las versiones ("2.1.2") se dejan intactas.
+  espeak YA expande "3"->"tres" y "12"->"doce" (verificado por ASR), pero
+  con /θ/ peninsular y sin arreglar los miles: la conversión propia lo
+  hace determinista y con seseo.
+- Se aplica SOLO al sintetizar (`prepare_text_for_tts` dentro de
+  `KokoroAdapter.synthesize` y `XTTSAdapter.generate`, con `log`
+  opcional); la BD y el guion no se tocan. Cada sustitución se registra
+  en el log: `◆ Pronunciación: «X» -> «Y»`.
+
+### (2) Clics — CONFIRMADO en dos puntos, no en las juntas Kokoro
+- **Juntas Kokoro con pausa: LIMPIAS** (medido: salto <= 0.00006; colas
+  con rampa suave, DC ~-0.0005). Kokoro rellena cada segmento con ~37 ms
+  de entrada y ~50 ms de salida en casi-silencio, así que ni el corte a
+  mitad de palabra hacía saltar la muestra (salto 0.0000).
+- **Corte real 1: `_split_chunk` partía palabras.** Un segmento >600
+  caracteres sin ". " en la ventana se cortaba en max_chars: "afil" |
+  "aban" se oían como dos palabras rotas (ASR: "afíl" + "Abansos").
+  Arreglo: el corte cae en el último ". " / ", " / "; " / espacio antes
+  del límite; solo sin ningún espacio se corta en max_chars.
+- **Corte real 2: recorte duro (clipping).** `process_segment_light`
+  normalizaba a RMS 0.12 y limitaba duro a 0.90: picos escalados a
+  1.19-1.44 -> 11-48 muestras recortadas por segmento (flat-tops =
+  aspereza/crujido en las sílabas fuertes). Y `_gain_for` + `np.clip`
+  a ±1.0 recortaba además los gritos. Arreglo: compresor suave
+  (umbral 0.30, ratio 3.0) antes del limitador en la variante ligera
+  (medido: 0 recortadas, pico 0.60-0.68, RMS 0.108-0.112) y ganancia
+  dirigida con techo de pico (`_apply_directed_gain`: la ganancia baja
+  lo justo para que el pico quede en 0.98; el susurro sigue ~3.8x por
+  debajo del grito). La ganancia con techo de pico sola se descartó
+  por medición (RMS 0.075-0.090, reintroducía volumen desigual).
+- **Blindaje de juntas en `_concat`:** cada clip de segmento pasa por
+  `remove_dc` + `edge_fade` (fundido de coseno elevado, 8 ms, inaudible
+  como hueco). Verificado con segmentos ABRUPTOS forzados (relleno
+  quitado + DC +0.05): salto en la junta 0.00000. Las pausas dirigidas
+  se respetan igual (el fundido solo toca los bordes del audio).
+- **"baja" y el ASR:** par mínimo verificado; nombres: "Hunahpú" se
+  oye bien ("Una pú" = /unaˈpu/ correcto); "Ixbalanqué" perdía la /i/
+  inicial en ASR ("x valanque") — lo mitiga el léxico /ʃ/.
+
+### (3) Volumen — v0.7.1 ya lo cubría para Kokoro; verificado, no duplicado
+- RMS crudo por voz (misma frase): em_alex 0.068-0.076, em_santa
+  0.073-0.078, ef_dora 0.068-0.075 (diferencia ~5-8%). Tras
+  `_process_segment` + ganancia dirigida: **RMS 0.134-0.141 en las 12
+  combinaciones voz/frase (banda 1.05x), 0 muestras recortadas.**
+- No se duplicó procesado: el único cambio es el compresor suave
+  (arriba), medido como necesario por el recorte. XTTS NO se pudo medir
+  en VM (coqui-tts/torch no instalados; el modelo XTTS-v2 está en la
+  caché HF pero sin el runtime): su volumen entre voces queda para la
+  laptop de Alberto. La normalización por segmento lo cubre en teoría
+  (todas las rutas convergen en `_process_segment`).
+
+### Tests v0.7.2 (2026-11-21, VM)
+- `tests/test_v072.py` (nuevo): **17/17** (G2P es-419 sin /θ/ vía
+  subproceso — test_aurea sustituye misaki por módulos vacíos, así que
+  los fonemas se verifican fuera del proceso de pytest; léxico, números,
+  _split_chunk sin cortes, juntas sin clic, light sin recorte, ganancia
+  sin recorte con dinámica 3.8x, log de sustituciones).
+- Suite completa: `pytest tests/` **76/76 + 1 omitido (XTTS) en 2
+  corridas consecutivas** (16+15+18+11+17, contando el omitido).
+- `verificar_pausas/wav_capitulo/direccion/md`: TODAS PASAN.
+- `scripts/smoke_fase4c.py`: exit 0 con SKIP honesto (XTTS no disponible).
+- Fakes actualizados al contrato v0.7.2 (`log=None` en `synthesize`):
+  `tests/test_aurea.py::FakeKokoro`,
+  `scripts/verificar_wav_capitulo.py::FakeKokoro`.
+- Entorno VM: el binario tesseract DESAPARECIÓ de la VM entre sesiones
+  (también /tmp/kokoro-model); se reinstaló 5.3.4 + spa/eng/osd por apt
+  (el espejo cogentco falla en noble-security, pero la instalación
+  completó). espeak-ng NO es instalable desde este apt (no está en las
+  listas) y no hace falta: misaki 0.9.4 funciona sin el binario.
+- Queda por verificar en la laptop de Alberto: el oído real (ceceo
+  fuera, nombres mayas, clics fuera, volumen entre voces Kokoro/XTTS),
+  y si "baja"->"paja" reaparece con XTTS o en alguna frase concreta.
 
 ## Regla de trabajo (compacción)
 En cada pausa natural, revisar el consumo de contexto. Si supera ~70 %, escribir/actualizar `STATE.md` antes de continuar: qué se construye, qué está hecho (rutas exactas), qué falta, decisiones y siguiente paso. Al iniciar o reanudar, leer primero `STATE.md`; si no existe, partir de cero sin asumir progreso previo (no es error).

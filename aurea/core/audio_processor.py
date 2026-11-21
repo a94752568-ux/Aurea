@@ -137,6 +137,45 @@ class AudioProcessor:
         return np.stack([new_left, new_right], axis=1)
 
     # ------------------------------------------------------------------ #
+    # 6. Limpieza de juntas (v0.7.2): offset DC y fundidos de borde
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def remove_dc(samples):
+        """Quita el offset DC (media) por canal. Kokoro sale con DC ~-0.0005;
+        un salto de DC en la junta se oye como clic aunque sea pequeño."""
+        samples = np.asarray(samples, dtype=np.float32)
+        if samples.size == 0:
+            return samples
+        if samples.ndim == 1:
+            return samples - np.mean(samples)
+        return samples - np.mean(samples, axis=0, keepdims=True)
+
+    @staticmethod
+    def edge_fade(samples, sr, fade_ms=8.0):
+        """Fundido de coseno elevado (8 ms) al inicio y al final del clip.
+
+        Las juntas de _concat ya no dependen de que el motor rellene con
+        silencio: cualquier segmento (Kokoro, XTTS, caché vieja) empieza
+        y termina en cero. 8 ms es inaudible como hueco y mata el salto
+        de muestra en la frontera.
+        """
+        samples = np.asarray(samples, dtype=np.float32)
+        if samples.size == 0:
+            return samples
+        n = int(round(sr * fade_ms / 1000))
+        n = max(1, min(n, len(samples) // 2))
+        t = np.linspace(0.0, 1.0, n, dtype=np.float32)
+        ramp = (0.5 - 0.5 * np.cos(np.pi * t)).astype(np.float32)
+        out = samples.copy()
+        if samples.ndim == 1:
+            out[:n] *= ramp
+            out[-n:] *= ramp[::-1]
+        else:
+            out[:n] *= ramp[:, None]
+            out[-n:] *= ramp[::-1][:, None]
+        return out
+
+    # ------------------------------------------------------------------ #
     # Pipelines completos
     # ------------------------------------------------------------------ #
     def process_segment(self, samples, sr=None):
@@ -160,20 +199,23 @@ class AudioProcessor:
 
     def process_segment_light(self, samples, sr=None):
         """Variante ligera para un segmento individual (v0.7.1, la que usa
-        el generador): solo normalizar RMS (0.12) + limitar (0.90).
+        el generador): quitar DC -> normalizar RMS (0.12) -> comprimir
+        suave -> limitar (0.90).
 
-        Elegida por medición (ver /tmp/medir_v071.py, 2026-11-21): iguala
-        la sonoridad entre segmentos exactamente igual que la completa
-        (RMS 0.1200 en los tres niveles probados, frente a ~0.10 de la
-        completa, que baja por su propio compresor) y NO duplica la
-        compresión ni los graves del master (bass_ratio 0.005, igual que
-        el control sin proceso por segmento; crest 2.97 frente a 2.71).
-        Además es ~10x más rápida (sin el bucle Python de bass_boost) y
-        conserva la forma del audio (mono sigue mono; _concat ya pasa a
-        estéreo). La dinámica dirigida (susurro/grito) se aplica DESPUÉS
-        en el generador, así que no se aplana.
+        v0.7.2: se añadió el compresor suave (umbral 0.30, ratio 3.0) ANTES
+        del limitador. Medido con las 3 voces Kokoro reales (15 segmentos):
+        sin compresor el limitador duro recortaba 11-48 muestras por
+        segmento (picos escalados a 1.19-1.44 -> techo 0.90); con compresor,
+        0 muestras recortadas, pico 0.60-0.68 y RMS 0.108-0.112 (banda
+        estrecha; el master del capítulo lo levanta a 0.14). La ganancia
+        con techo de pico se descartó por medición: dejaba el RMS en
+        0.075-0.090 y reintroducía diferencias de volumen entre voces.
+        La dinámica dirigida (susurro/grito) se aplica DESPUÉS en el
+        generador, así que no se aplana.
         """
+        samples = self.remove_dc(samples)
         samples = self.normalize_rms(samples)
+        samples = self.compress(samples, threshold=0.30, ratio=3.0)
         samples = self.limit(samples)
         return samples
 
