@@ -127,7 +127,44 @@ class Database:
         if "voice_profile_id" not in char_cols:
             self.conn.execute(
                 "ALTER TABLE characters ADD COLUMN voice_profile_id INTEGER")
+        # Migración v0.6.0 (OCR): confianza media por página.
+        # Tabla propia (no columna en chapters: un capítulo no es una
+        # página; aquí cabe además método, PSM, columnas y revisión).
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS ocr_pages("
+            "book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE, "
+            "page_no INTEGER NOT NULL, "
+            "method TEXT NOT NULL, "
+            "mean_confidence REAL NOT NULL DEFAULT 100.0, "
+            "psm INTEGER, columns INTEGER NOT NULL DEFAULT 1, "
+            "needs_review INTEGER NOT NULL DEFAULT 0, "
+            "PRIMARY KEY(book_id, page_no))")
         self._commit()
+
+    # ---- páginas OCR (v0.6.0) ----
+    def set_ocr_pages(self, book_id, pages):
+        """Guarda la confianza por página de un libro importado con OCR.
+        `pages`: lista de OcrPageResult o de dicts to_dict()."""
+        self.conn.execute("DELETE FROM ocr_pages WHERE book_id=?", (book_id,))
+        for p in pages:
+            d = p.to_dict() if hasattr(p, "to_dict") else p
+            self.conn.execute(
+                "INSERT INTO ocr_pages(book_id, page_no, method, "
+                "mean_confidence, psm, columns, needs_review) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (book_id, d["page_no"], d["method"],
+                 d["mean_confidence"], d.get("psm"), d["columns"],
+                 int(d["needs_review"])))
+        self._commit()
+
+    def ocr_pages(self, book_id):
+        rows = self.conn.execute(
+            "SELECT book_id, page_no, method, mean_confidence, psm, "
+            "columns, needs_review FROM ocr_pages "
+            "WHERE book_id=? ORDER BY page_no", (book_id,))
+        return [dict(zip(("book_id", "page_no", "method",
+                          "mean_confidence", "psm", "columns",
+                          "needs_review"), r)) for r in rows]
 
     # ---- libros ----
     def add_book(self, title, path, fmt):

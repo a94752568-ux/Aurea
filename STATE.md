@@ -1,7 +1,7 @@
 # AUREA — Estado compactado (STATE.md)
 
 Generado: 2026-11-12. Actualizado tras implementar mejoras para EL QUINTO SOL (reglas de pausas v2, soporte Markdown v2, sistema de dirección, clonación XTTS integrada).
-**Actualizado 2026-11-21: reparación de auditoría (Fases 1–5) + acabado cyberpunk premium + versión 0.5.0.** Ver la sección "Reparación 2026-11-20/21" al final.
+**Actualizado 2026-11-21: reparación de auditoría (Fases 1–5) + acabado cyberpunk premium + versión 0.5.0. Actualizado 2026-11-21: OCR local para PDF escaneados + versión 0.6.0.** Ver las secciones "Reparación 2026-11-20/21" y "OCR para PDF escaneados (v0.6.0)" al final.
 Uso: leer este archivo y la memoria antes de seguir trabajando. No rehacer lo ya hecho.
 
 ## Qué se está construyendo
@@ -170,6 +170,48 @@ Ver la sección "Reparación 2026-11-20/21" arriba (conteos exactos 2026-11-21).
 8. 🔲 Probar con un libro más largo y EPUB/PDF - PENDIENTE
 9. 🔲 Importar guion.md de EL QUINTO SOL y verificar 6 personajes, 99 segmentos + anuncio de título - PENDIENTE (esperando archivo del usuario)
 10. 🔲 Aplicar direccion-larga.csv y generar primera escena como prueba de pipeline - PENDIENTE (esperando archivo del usuario)
+
+## OCR para PDF escaneados (v0.6.0, 2026-11-21)
+
+**Capacidad:** importar PDF escaneados (imágenes sin capa de texto) con OCR 100% local y CPU-only. Decisión POR PÁGINA: capa de texto con >=30 caracteres y >=5 palabras -> ruta "texto"; si no, ruta OCR. El texto OCR entra al pipeline existente (segmentador → detector → generador) sin cambios en esos módulos.
+
+**Archivos:**
+- `aurea/ingestion/ocr_reader.py` (nuevo): motor OCR + limpieza quirúrgica + caché + informe. `read_pdf_ocr()` devuelve (capítulos, informe, [OcrPageResult]).
+- `aurea/ingestion/pdf_reader.py`: `PdfBookReader` usa PyMuPDF por página; sin dependencias OCR conserva la ruta antigua (pypdf + ValueError ante escaneo). `scan_pdf()` = pre-escaneo rápido para la UI.
+- `aurea/ingestion/import_worker.py` (nuevo): `ImportWorker` QThread (progreso por página, cancelable, pausable). Mismo guarda único `active_worker` que generador/director: OCR y TTS nunca a la vez.
+- `aurea/ui/ocr_dialog.py` (nuevo): aviso "PDF escaneado detectado — OCR local (Tesseract)", selector de idioma (Español / Español+Inglés), DPI (300 por defecto).
+- `aurea/ui/main_window.py`: `_import_book` pre-escanea los PDF; si hay páginas escaneadas muestra el diálogo y lanza el worker; `_finish_import` guarda el libro + confianza por página + escribe el reporte; `_show_ocr_report` muestra el resumen con botón "Abrir reporte"; botón "✕ Cancelar importación" en Biblioteca.
+- `aurea/core/database.py`: migración v0.6.0 — tabla `ocr_pages(book_id, page_no, method, mean_confidence, psm, columns, needs_review)` + `set_ocr_pages()` / `ocr_pages()`. Decisión documentada: tabla propia, no columna en `chapters` (un capítulo no es una página).
+- `aurea/ingestion/importer.py`: `import_book()` acepta kwargs aditivos `ocr_lang/ocr_dpi/ocr_progress/ocr_cancel/ocr_cache_root`; la interfaz anterior no cambia. El informe queda en `import_book.last_ocr_report`.
+- `requirements-ocr.txt` (nuevo). Versión `0.6.0` en `aurea/__init__.py` (única constante).
+
+**Dependencias nuevas (licencias VERIFICADAS 2026-11-21 en la VM):**
+- Tesseract 5.3.4 (binario, apt): **Apache 2.0** (verificado en `/usr/share/doc/tesseract-ocr/copyright`).
+- pytesseract 0.3.13: **Apache 2.0** (metadato pip; corrección: el PROMPT decía MIT, el dato verificado es Apache 2.0).
+- PyMuPDF 2.1: **AGPL-3.0** (dual AGPL / comercial Artifex, metadato pip). Uso local personal sin distribución: sin problema. Si AUREA se distribuyera algún día, PyMuPDF exigiría publicar el código bajo AGPL o comprar la licencia comercial.
+- Pillow 13.0.0: **MIT-CMU** (permisiva).
+- Instalación en laptop: `sudo apt install tesseract-ocr tesseract-ocr-spa tesseract-ocr-eng` + `pip install pymupdf pillow pytesseract` en el `.venv`.
+- Nota VM: Pillow 13.0.0 en `~/.venv-aurea` no trae el codificador PNG (`features.check('png')` False); el fixture de tests usa JPEG. El código de producción nunca codifica PNG: sin impacto en AUREA.
+
+**Semántica de caché:** `AUREA_HOME/ocr_cache/<sha256(pdf)[:16]>_p<NNNN>_d<DPI>_<idiomas>_t<versión Tesseract>_v<CACHE_VERSION>.json` → líneas crudas + TSV + confianza. La segunda importación del mismo PDF reutiliza la caché y no re-OCRea nada. La cancelación es reanudable por la misma vía. `CACHE_VERSION` (hoy 2) se sube si cambia el preprocesado o el OCR; invalida las entradas viejas. La limpieza (encabezados/números) corre DESPUÉS de leer la caché, así que un cambio de limpieza no necesita invalidarla.
+
+**Limpieza quirúrgica (v1):** orden de lectura por columna (1 o 2, por posición x); PSM 6 por defecto, 4 si 2 columnas, 3 fallback (elección por página en el log); encabezados/pies repetidos en la misma zona en 3+ páginas consecutivas → eliminados y registrados; números de página (solo dígitos, 10% sup/inf) → eliminados y registrados; desguionado (continuación en minúscula); normalización (ligaduras, comillas, guiones largos a —, espacios, corchetes eliminados: ningún segmento puede contener `[`); notas al pie conservadas como párrafos normales al final de la página y registradas.
+
+**Tres correcciones halladas con la muestra REAL (Popol Vuh, 2026-11-21):**
+1. **OSD con confianza mínima (OSD_MIN_CONFIDENCE = 5.0):** Tesseract OSD dio un falso 180° en p9 (confianza 3.45) y el código la giraba boca abajo (conf media 35.4, basura total). Páginas bien detectadas: 8.98–13.42. Ahora solo se rota si confianza ≥ 5.0; si no, 0°. La p5 del fixture (giro real 180°, conf 12.21) sigue corrigiéndose.
+2. **Zonas medidas sobre la imagen OCR-eada, no el render:** el recorte de márgenes del preprocesado achica la imagen; las coordenadas TSV son de la imagen recortada. `OcrPageResult.img_height` guarda ese alto y `clean_pages` lo usa por página (con fallback al alto del render).
+3. **Número de página como última línea:** los escaneos traen márgenes blancos anchos y el número impreso queda a ~85% de la altura (fuera del 10% inf). Regla añadida: una línea solo-dígitos que sea la ÚLTIMA de la página también es número de página. Regex relajado a `^[\W_]*\d{1,4}[\W_]*$` (caza «: 1», «(3)», «— 10 —»). Con esto los números eliminados en la muestra pasaron de 1 a 5.
+4. **PSM 4 descartado si fusiona columnas:** en el fixture, PSM 4 unía las dos columnas en una sola línea («Columna izquierda: el Columna derecha: en la»); ahora se conserva PSM 6 si PSM 4 produce líneas que cruzan la división de columnas.
+
+**Confianza:** media por palabra (TSV conf) y por página; páginas con media <70 → `revisar`; palabras conf <40 listadas. Informe por libro en `output/ocr_<book_id>_reporte.md`.
+
+**Limitaciones v1 (documentadas en cada informe):** tablas aplanadas fila por fila (sin reconstruir celdas); imágenes no descritas (pies de foto como texto normal); deskew solo giros de 90°/180°/270° por OSD (inclinación fina no corregida); la limpieza quirúrgica solo se aplica a páginas OCR (las de texto conservan su capa tal cual, para no cambiar la regresión de PDF con texto).
+
+**Verificación Fase 2 preliminar (2026-11-21, VM, 300 DPI, spa+eng):**
+- Fixture SINTÉTICO (`tests/test_ocr.py`, 6 págs.: 1 texto + 5 escaneadas): 5 OCR / 1 texto, conf media 95.4, 0 revisar, 5 encabezados + 5 números eliminados, 1 palabra desguionada, 2.66 s/pág. (16.0 s total); 2ª corrida 0 llamadas OCR, 5/5 caché, 0.01 s; 0 `[` en el texto; PSM 6 en la de 2 columnas (PSM 4 fusionaba); p5 deskew 180° aplicado.
+- Muestra REAL Popol Vuh págs. 1–10 (`scripts/verificar_ocr_popolvuh.py`, reporte `output/ocr_popolvuh-muestra_reporte.md`): 10 OCR / 0 texto, conf media 72.7, revisar [1, 3, 4] (portada p1 46.2, portadilla p3 60.3, colofón p4 44.4; cuerpo p5–p10: 75.0–89.5), 0 encabezados/pies (esta edición no los tiene en pp. 1–10), 5 números eliminados (p2 «11», p7 «8», p8 «9», p9 «10», p10 «: 1»), 27 palabras desguionadas, 122 palabras conf <40, 5.42 s/pág. (54.2 s total, corrida en frío) → libro completo (183 págs.) estimado ~16.5 min; 2ª corrida 0.3 s (10/10 caché). 0 `[` en el texto (9,492 caracteres). Págs. a 2 columnas detectadas [1, 4] = falsos positivos (portada/colofón, no cuerpo a 2 columnas); PSM 6 en todas. **Corrección 2026-11-21 (verificación propia de Nova):** el desguionado no se reexaminaba tras unir y dejaba 7 guiones con dos cortes seguidos (p. ej. elocuen-/cia); ahora une en cadena — 27 uniones (antes 23), 0 continuaciones en minúscula sin unir; los 3 guiones restantes son continuación en mayúscula (regla: no se unen) o ruido de portada. Test de regresión `test_dehyphenation_chained` añadido.
+- Suite completa: `pytest tests/test_aurea.py tests/test_ocr.py` 31/31 (16 existentes + 15 OCR, incl. el nuevo test de desguionado en cadena); `verificar_pausas/wav_capitulo/direccion/md` OK; smoke GUI offscreen OK (MainWindow + OcrOptionsDialog, spa+eng, 300 DPI).
+- La verificación real del libro completo (183 págs.) espera a Alberto. Advertencia honesta: el escaneo fuente es de ~100 DPI (464×656 px por página); el cuerpo se lee bien (conf 75–90) pero con errores de OCR («mo se encore traban», «habán», «laz obras»); portada/portadilla/colofón salen mal (conf 44–60) y conviene revisarlos o excluirlos al importar.
 
 ## Regla de trabajo (compacción)
 En cada pausa natural, revisar el consumo de contexto. Si supera ~70 %, escribir/actualizar `STATE.md` antes de continuar: qué se construye, qué está hecho (rutas exactas), qué falta, decisiones y siguiente paso. Al iniciar o reanudar, leer primero `STATE.md`; si no existe, partir de cero sin asumir progreso previo (no es error).

@@ -1,0 +1,15 @@
+# Dependencias OCR (v0.6.0) — solo para importar PDF escaneados.
+# Licencias verificadas 2026-11-21 en la VM (ver STATE.md):
+#   PyMuPDF 2.1 ..... AGPL-3.0 (dual AGPL / comercial Artifex)
+#   Pillow 13.0.0 ... MIT-CMU (licencia permisiva estilo HPND)
+#   pytesseract 0.3.13  Apache 2.0 (metadato pip; el PROMPT decía MIT,
+#                      el dato verificado es Apache 2.0)
+# Además, en el sistema (apt, no pip):
+#   tesseract-ocr, tesseract-ocr-spa, tesseract-ocr-eng ... Apache 2.0
+#   (verificado en /usr/share/doc/tesseract-ocr/copyright)
+# Uso local personal sin distribución: sin problema con AGPL-3.0.
+# Si AUREA se distribuyera algún día, PyMuPDF exigiría publicar el
+# código bajo AGPL o comprar la licencia comercial de Artifex.
+pymupdf>=1.24
+pillow>=10.0
+pytesseract>=0.3.13

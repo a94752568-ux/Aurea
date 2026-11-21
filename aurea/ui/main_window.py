@@ -3,12 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractButton,
     QCheckBox,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
@@ -46,13 +47,17 @@ from ..ui.theme import (
 
 from ..casting.cast_manager import CastManager
 from ..casting.detector import detect_characters
-from ..core.database import Database
+from ..core.database import Database, aurea_home
 from ..core.generator import ChapterGenerator, segmentize
 from ..direction.director import DirectionWorker
 from ..direction.rules import EMOTIONS
+from ..ingestion.import_worker import ImportWorker
 from ..ingestion.importer import import_book
+from ..ingestion.ocr_reader import write_ocr_report
+from ..ingestion.pdf_reader import PdfBookReader
 from ..voice import clone_store
 from .clone_panel import ClonePanel
+from .ocr_dialog import OcrOptionsDialog
 
 # Glifos de la barra lateral: solo caracteres presentes en DejaVu Sans Mono
 # (verificado con fontTools en la VM). NADA de emoji: en Lubuntu sin fuentes
@@ -102,6 +107,7 @@ class MainWindow(QFrame):
         self._last_wav = None
         self.audio_out = None
         self._pending_gen = None  # (chapter, force) de la cadena dirigir→generar
+        self._last_import_path = None  # ruta del PDF en importación OCR
         self._use_llm = False     # A10: refinamiento Ollama (casilla Dirección)
         self._volume = 0.8        # M19: volumen real del deslizador
 
@@ -260,6 +266,15 @@ class MainWindow(QFrame):
         btn_del.clicked.connect(self._delete_book)
         panel.body.addWidget(btn_del)
 
+        # v0.6.0 (OCR): cancelar una importación en curso (solo se
+        # habilita mientras el ImportWorker corre).
+        self.btn_cancel_import = self._btn(
+            "✕ Cancelar importación", "ghost",
+            "Cancelar la importación OCR en curso (lo ya procesado queda en caché)")
+        self.btn_cancel_import.setEnabled(False)
+        self.btn_cancel_import.clicked.connect(self._cancel_import)
+        panel.body.addWidget(self.btn_cancel_import)
+
         lay.addWidget(panel, 1)
         return page
 
@@ -269,12 +284,10 @@ class MainWindow(QFrame):
             "Libros (*.txt *.epub *.pdf *.md)")
         if not path:
             return
-        try:
-            title, chapters = import_book(path)
-        except Exception as e:  # noqa: BLE001
-            QMessageBox.warning(self, "Importación", f"No se pudo importar:\n{e}")
-            return
-        # M11: re-importar el mismo archivo no duplica el libro.
+        # M11: re-importar el mismo archivo no duplica el libro (se
+        # comprueba ANTES de lanzar el worker OCR: la caché haría la
+        # segunda importación casi instantánea, pero no debe crear otro
+        # libro en la biblioteca).
         existing = self.db.book_by_path(path)
         if existing:
             toast(self, f"«{existing.title}» ya estaba importado; lo abro.", kind="info")
@@ -284,15 +297,124 @@ class MainWindow(QFrame):
                     self.book_list.setCurrentRow(i)
                     break
             return
+        # v0.6.0 (OCR): un PDF con páginas escaneadas va por el worker
+        # en segundo plano, con diálogo de idioma/DPI.
+        if Path(path).suffix.lower() == ".pdf":
+            scan = PdfBookReader.scan_pdf(path)
+            scanned = [s for s in scan if s["scanned"]]
+            if scanned:
+                if self.active_worker and self.active_worker.isRunning():
+                    QMessageBox.information(
+                        self, "AUREA", "Ya hay un proceso en curso.")
+                    return
+                dlg = OcrOptionsDialog(self, len(scanned), len(scan))
+                if dlg.exec() != QDialog.Accepted:
+                    return
+                self._start_ocr_import(path, dlg.lang, dlg.dpi)
+                return
+        try:
+            title, chapters = import_book(path)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "Importación", f"No se pudo importar:\n{e}")
+            return
+        self._finish_import(path, title, chapters)
+
+    def _finish_import(self, path, title, chapters, ocr_report=None,
+                       ocr_pages=None) -> None:
+        """Guarda el libro importado (síncrono u OCR) en la BD. Si trae
+        informe OCR, guarda la confianza por página y escribe el
+        reporte en output/ocr_<book_id>_reporte.md."""
         book_id = self.db.add_book(title, path, Path(path).suffix.lower().lstrip("."))
         # M25: un solo commit por libro, no uno por capítulo/segmento.
         with self.db.transaction():
             for i, (ctitle, text) in enumerate(chapters):
                 self.db.add_chapter(book_id, i, ctitle, text)
+        report_path = None
+        if ocr_report is not None and ocr_pages:
+            self.db.set_ocr_pages(book_id, ocr_pages)
+            report_path = write_ocr_report(
+                ocr_report, book_id, aurea_home() / "output")
         self.log_line(f"» Importado «{title}»: {len(chapters)} capítulos")
         toast(self, f"» Libro importado: «{title}»", kind="ok")
         self.refresh_books()
         self.book_list.setCurrentRow(self.book_list.count() - 1)
+        if report_path is not None:
+            self._show_ocr_report(ocr_report, report_path)
+
+    def _show_ocr_report(self, report, report_path) -> None:
+        """Resumen de calidad tras importar con OCR + botón al reporte."""
+        msg = QMessageBox(self)
+        msg.setWindowTitle("AUREA — Informe OCR")
+        msg.setText(
+            f"Importado con OCR local.\n"
+            f"Páginas por OCR: {report.ocr_pages} de {report.total_pages}.\n"
+            f"Confianza media: {report.mean_conf:.1f}.\n"
+            f"Páginas a revisar: "
+            f"{', '.join(map(str, report.review_pages)) or 'ninguna'}.\n"
+            f"Elementos eliminados: {len(report.removed)}.\n"
+            f"Ritmo: {report.seconds_per_page:.1f} s/página.")
+        msg.setInformativeText(f"Reporte completo en:\n{report_path}")
+        open_btn = msg.addButton("Abrir reporte", QMessageBox.ActionRole)
+        msg.addButton(QMessageBox.Ok)
+        msg.exec()
+        if msg.clickedButton() is open_btn:
+            QDesktopServices.openUrl(
+                QUrl.fromLocalFile(str(report_path)))
+
+    # ---- Importación OCR en segundo plano (v0.6.0) ----
+    def _start_ocr_import(self, path, lang, dpi) -> None:
+        # Regla AUREA: OCR y TTS nunca a la vez (mismo guarda único).
+        self._last_import_path = path
+        self.active_worker = ImportWorker(path, lang=lang, dpi=dpi)
+        self.active_worker.progress.connect(
+            lambda p, m: self._update_progress(p, m, COLORS['cyan']))
+        self.active_worker.log.connect(self.log_line)
+        self.active_worker.failed.connect(self._on_import_failed)
+        self.active_worker.cancelled.connect(self._on_import_cancelled)
+        self.active_worker.finished_ok.connect(self._on_import_ok)
+        self.btn_cancel_import.setEnabled(True)
+        self.status_lbl.setText("● Importando con OCR…")
+        self.status_lbl.setStyleSheet(
+            f"color:{COLORS['cyan']};font-family:monospace;font-size:11px;")
+        self.active_worker.start()
+
+    def _cancel_import(self) -> None:
+        if self.active_worker is not None:
+            self.active_worker.request_cancel()
+
+    def _on_import_ok(self, title, chapters, report, pages) -> None:
+        self.active_worker = None
+        self.btn_cancel_import.setEnabled(False)
+        self.progress_bar.hide()
+        self.progress_bar.setValue(0)
+        self.status_lbl.setText("● KOKORO · LISTO")
+        self.status_lbl.setStyleSheet(
+            f"color:{COLORS['green']};font-family:monospace;font-size:11px;")
+        # La ruta original es la elegida en el diálogo de archivo.
+        path = getattr(self, "_last_import_path", None) or title
+        self._finish_import(path, title, chapters,
+                            ocr_report=report, ocr_pages=pages)
+
+    def _on_import_failed(self, err) -> None:
+        self.active_worker = None
+        self.btn_cancel_import.setEnabled(False)
+        self.progress_bar.hide()
+        self.progress_bar.setValue(0)
+        self.status_lbl.setText("● ERROR")
+        self.status_lbl.setStyleSheet(
+            f"color:{COLORS['magenta']};font-family:monospace;font-size:11px;")
+        toast(self, f"✗ Error al importar: {err}", kind="error")
+
+    def _on_import_cancelled(self) -> None:
+        self.active_worker = None
+        self.btn_cancel_import.setEnabled(False)
+        self.progress_bar.hide()
+        self.progress_bar.setValue(0)
+        self.status_lbl.setText("● KOKORO · LISTO")
+        self.status_lbl.setStyleSheet(
+            f"color:{COLORS['green']};font-family:monospace;font-size:11px;")
+        toast(self, "Importación cancelada: lo procesado quedó en caché.",
+              kind="warn")
 
     def _delete_book(self) -> None:
         item = self.book_list.currentItem()
